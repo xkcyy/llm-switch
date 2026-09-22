@@ -1,0 +1,254 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  background: #f5f7fb;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-sider {
+  border-right: 1px solid #eef0f5;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+
+.app-sider .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* 品牌区与顶部栏保持同一高度，视觉基线对齐 */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 60px;
+  padding: 0 18px;
+  border-bottom: 1px solid #eef0f5;
+  box-sizing: border-box;
+  flex: none;
+}
+
+.brand-mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #2f6bff, #57c2ff);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: 0.5px;
+  box-shadow: 0 5px 12px rgba(47, 107, 255, 0.26);
+}
+
+.brand-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.brand-sub {
+  font-size: 11px;
+  color: #9aa1b1;
+  line-height: 1.25;
+}
+
+/* 侧栏底部：整块区域与菜单项对齐，版本号单独一行居中 */
+.sider-foot {
+  margin-top: auto;
+  padding: 8px 12px 14px;
+  border-top: 1px solid #f1f3f8;
+  flex: none;
+}
+
+.sider-foot .ant-btn {
+  justify-content: flex-start;
+  color: #5b6272;
+}
+
+.sider-foot .ant-btn:hover {
+  background: #f5f7fb;
+  color: #2f6bff;
+}
+
+.sider-version {
+  margin-top: 8px;
+  text-align: center;
+  font-size: 11px;
+  color: #b0b6c3;
+  letter-spacing: 0.2px;
+}
+
+/* 顶部栏：紧凑单行标题 + 右侧状态 */
+.app-header {
+  height: 60px;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #eef0f5;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.page-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.page-title {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.page-sub {
+  font-size: 12px;
+  color: #9aa1b1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: #fff;
+  margin-inline-end: 0;
+}
+
+.app-content {
+  padding: 20px 24px 32px;
+  max-width: 1200px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.stat-card .ant-card-body {
+  padding: 16px 18px;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: #9aa1b1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stat-value {
+  font-size: 22px;
+  font-weight: 600;
+  margin-top: 4px;
+  line-height: 1.2;
+}
+
+.stat-extra {
+  font-size: 12px;
+  color: #9aa1b1;
+  margin-top: 4px;
+}
+
+.provider-item {
+  padding: 12px 14px !important;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.provider-item:hover {
+  background: #f7f9fd;
+}
+
+.provider-item.active {
+  background: #f0f5ff;
+  border-color: #c9dbff;
+}
+
+.provider-name {
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.provider-meta {
+  font-size: 12px;
+  color: #9aa1b1;
+  margin-top: 2px;
+  line-height: 1.3;
+}
+
+/* 供应商长地址放在正文里，避免挤占标题栏操作区 */
+.provider-url {
+  max-width: 100%;
+  margin-bottom: 4px;
+}
+
+.soft-card {
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.03), 0 8px 24px -12px rgba(16, 24, 40, 0.12);
+  border: 1px solid #eef0f5;
+}
+
+.codex-hero {
+  border-radius: 14px;
+  padding: 24px 28px;
+  background: linear-gradient(120deg, #eef4ff 0%, #f7fbff 55%, #ffffff 100%);
+  border: 1px solid #dbe6ff;
+}
+
+.codex-hero h2 {
+  margin: 0 0 6px;
+  font-size: 19px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.ant-table .mono {
+  white-space: nowrap;
+}
+
+/* 表头不换行，窄屏由横向滚动兜底，保证列宽与对齐稳定 */
+.ant-table-thead > tr > th {
+  white-space: nowrap;
+}
+
+.steps-card .ant-steps-item-title {
+  font-size: 13px !important;
+}
+
+.editor-area textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+  font-size: 12px !important;
+  line-height: 1.6 !important;
+}
+
+.ant-card {
+  border-radius: 12px;
+}

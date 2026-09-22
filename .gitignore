@@ -1,0 +1,21 @@
+# 构建产物
+dist/
+*.exe
+
+# 本地运行产物
+*.tmp
+*.log
+.llm-switch/
+
+# Python
+__pycache__/
+*.pyc
+
+# 前端
+node_modules/
+web/node_modules/
+web/dist/
+prototype/node_modules/
+prototype/dist/
+prototype/.playwright-cli/
+.playwright-cli/
