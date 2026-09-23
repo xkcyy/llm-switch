@@ -97,7 +97,7 @@ screenshots/          真实数据下的界面截图
 - 真实 OpenCode（npm 1.2.22 / 1.2.25 与桌面版 2.0.6）：写入的 provider 段可被 `opencode debug config` 正常加载，`opencode models` 能列出全部 `llm-switch/*`，`opencode run --model llm-switch/<供应商ID>/<模型ID>` 经本机代理完成真实调用（chat 入口 → responses 上游），且配置改动无需重启即生效。两种形状分别验证：V1 形状两个版本都能读；V2 原生形状仅 2.x 能读（1.x 遇到未知键会整份配置报错），因此默认 auto 跟随现有文件。
 - 真实链路：模拟上游 → 代理（Responses 请求转换 Chat 流式回传）→ Codex 配置写入 → 界面全流程（截图见 `screenshots/`）。
 - 真实上游探测：KmAiModelHub API 路径与 OpenCode Go 三类端点（chat / messages / responses）均验证可达。
-- 真实上游复现与修复验证（2026-09-22）：用 Codex 真实失败会话（一轮两个并行 `exec_command` 调用）复现 DeepSeek / OpenCode Go 的 400；修复后同一历史分别验证「合并工具调用」通过、缺 `reasoning_content` 仍 400、补回填后 200。
+- 真实上游复现与修复验证（2026-09-22）：用 Codex 真实失败会话（一轮两个并行 `exec_command` 调用）复现 DeepSeek / OpenCode Go 的 400；修复后同一历史分别验证「合并工具调用」通过、缺 `reasoning_content` 仍 400、补回填后 200；`reasoning_content` 排查阶段另用 19 组工具调用的完整失败历史验证冷缓存非空回填（OCG 200）。
 
 ## 待验证与后续
 

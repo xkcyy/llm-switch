@@ -29,6 +29,7 @@ type Record struct {
 	Time         time.Time `json:"time"`
 	Entry        string    `json:"entry"`
 	Source       string    `json:"source,omitempty"`
+	Session      string    `json:"session,omitempty"`
 	RequestModel string    `json:"request_model"`
 	Provider     string    `json:"provider,omitempty"`
 	Model        string    `json:"model,omitempty"`
@@ -283,6 +284,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	}
 	rec.Provider = match.Provider.Name
 	rec.Model = match.Model.ID
+	rec.Session = sessionID(r, body, match.Model.ID)
 
 	up, err := match.UpstreamProtocol(entry)
 	if err != nil {
@@ -303,13 +305,18 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	}
 	if up == protocol.Chat {
 		// 思考型上游（DeepSeek 等）要求把 reasoning_content 原样回传；
-		// 冷缓存时按供应商类型补空值，保证请求合法。
+		// 缓存未命中时回填非空占位，兼顾「字段必须存在」与「部分网关要求非空」。
+		placeholderUsed := false
 		chatOpts.Reasoning = func(callID string) (string, bool) {
 			if text, ok := s.reasoning.get(match.Provider.ID, match.Model.ID, callID); ok {
 				return text, true
 			}
 			if needsReasoningEcho(match) {
-				return "", true
+				if !placeholderUsed {
+					placeholderUsed = true
+					rec.Warnings = append(rec.Warnings, "思考内容缓存未命中，已回填占位文本（不影响请求合法性）")
+				}
+				return reasoningPlaceholder, true
 			}
 			return "", false
 		}
@@ -340,8 +347,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	req.Header.Set("User-Agent", buildinfo.UserAgent())
 	// 会话标识：优先透传客户端已有的会话头，其次用「模型 + 首条用户消息」生成稳定值。
 	// OpenCode Go 依赖 x-opencode-session 做路由与提示缓存亲和。
-	if sid := sessionID(r, body, match.Model.ID); sid != "" {
-		req.Header.Set("x-opencode-session", sid)
+	if rec.Session != "" {
+		req.Header.Set("x-opencode-session", rec.Session)
 	}
 	applyAuth(req, match.Provider, up)
 
@@ -366,7 +373,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		rec.Error = fmt.Sprintf("上游 HTTP %d", resp.StatusCode)
+		rec.Error = fmt.Sprintf("上游 HTTP %d: %s", resp.StatusCode, upstreamErrorSummary(b, resp))
 		s.log(rec)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
@@ -439,6 +446,51 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	w.Write(b)
 	rec.DurationMS = time.Since(start).Milliseconds()
 	s.log(rec)
+}
+
+// ---- 上游错误摘要 ----
+
+// requestIDHeaders 是上游常见的请求 ID 响应头，用于把错误关联到供应商侧。
+var requestIDHeaders = []string{"x-request-id", "request-id", "x-ds-request-id", "x-opencode-request-id", "x-trace-id"}
+
+func upstreamRequestID(resp *http.Response) string {
+	for _, h := range requestIDHeaders {
+		if v := strings.TrimSpace(resp.Header.Get(h)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// upstreamErrorSummary 提取上游错误体的可读摘要（含 request id），便于排查。
+// 以前这里只记「上游 HTTP 400」，定位问题必须回捞 Codex 会话，代价很高。
+func upstreamErrorSummary(body []byte, resp *http.Response) string {
+	msg := strings.TrimSpace(string(body))
+	var parsed struct {
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &parsed) == nil {
+		switch {
+		case parsed.Error != nil && parsed.Error.Message != "":
+			msg = parsed.Error.Message
+		case parsed.Message != "":
+			msg = parsed.Message
+		}
+	}
+	msg = strings.Join(strings.Fields(msg), " ")
+	if len(msg) > 300 {
+		msg = msg[:300] + "…"
+	}
+	if id := upstreamRequestID(resp); id != "" {
+		msg += "（request id: " + id + "）"
+	}
+	if msg == "" {
+		msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
+	return msg
 }
 
 // ---- 协议分发 ----

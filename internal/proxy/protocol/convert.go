@@ -222,6 +222,8 @@ type chatMessage struct {
 	// ReasoningContent 是思考型上游（DeepSeek 等）要求回传的推理内容；
 	// 指针类型用于区分「不写该字段」与「写空字符串」。
 	ReasoningContent *string `json:"reasoning_content,omitempty"`
+	// Reasoning 是部分网关（OpenRouter 风格）的推理字段别名，仅用于解析上游响应。
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 type chatToolCall struct {
@@ -905,8 +907,14 @@ func ChatToResponsesResponseWith(body []byte, opts ResponseConvertOptions) ([]by
 				"call_id": tc.ID, "name": tc.Function.Name, "arguments": tc.Function.Arguments,
 			})
 		}
-		if opts.OnReasoning != nil && ch.Message.ReasoningContent != nil {
-			opts.OnReasoning(*ch.Message.ReasoningContent, callIDs)
+		if opts.OnReasoning != nil {
+			reasoningText := ch.Message.Reasoning
+			if ch.Message.ReasoningContent != nil {
+				reasoningText = *ch.Message.ReasoningContent
+			}
+			if reasoningText != "" {
+				opts.OnReasoning(reasoningText, callIDs)
+			}
 		}
 	}
 	if output == nil {

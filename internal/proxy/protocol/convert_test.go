@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 )
@@ -542,5 +543,84 @@ func TestCanConvertMatrix(t *testing.T) {
 				t.Fatalf("Messages 入口暂无反向转换: %s → %s", entry, up)
 			}
 		}
+	}
+}
+
+// failAfterReader 先返回数据、随后返回错误，用于模拟上游流中断。
+type failAfterReader struct {
+	data []byte
+	err  error
+}
+
+func (r *failAfterReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+// 流被中断时也要把已拿到的思考内容交给调用方，缓存能救下一轮请求。
+func TestStreamChatToResponsesCapturesReasoningOnAbortedStream(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"id":"c1","model":"m","choices":[{"delta":{"role":"assistant","reasoning_content":"推理"}}]}`,
+		``,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"f"}}]}}]}`,
+		``,
+	}, "\n")
+	var sb strings.Builder
+	var got string
+	var ids []string
+	err := StreamChatToResponsesWith(&failAfterReader{data: []byte(stream), err: io.ErrUnexpectedEOF}, &sb, nil, ResponseConvertOptions{
+		OnReasoning: func(reasoning string, callIDs []string) { got, ids = reasoning, callIDs },
+	})
+	if err == nil {
+		t.Fatal("期望返回读取错误")
+	}
+	if got != "推理" || len(ids) != 1 || ids[0] != "call_x" {
+		t.Fatalf("流中断也应捕获思考内容: %q %v", got, ids)
+	}
+}
+
+// 部分网关用 reasoning 字段名（OpenRouter 风格）返回推理内容。
+func TestStreamChatToResponsesReasoningAlias(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"id":"c1","model":"m","choices":[{"delta":{"role":"assistant","reasoning":"R"}}]}`,
+		``,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_y","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	var sb strings.Builder
+	var got string
+	err := StreamChatToResponsesWith(strings.NewReader(stream), &sb, nil, ResponseConvertOptions{
+		OnReasoning: func(reasoning string, callIDs []string) { got = reasoning },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "R" {
+		t.Fatalf("reasoning 别名未解析: %q", got)
+	}
+}
+
+// 非流式响应的 reasoning 别名同样要能捕获。
+func TestChatToResponsesReasoningAlias(t *testing.T) {
+	body := []byte(`{
+		"id":"c1","model":"m",
+		"choices":[{"message":{"role":"assistant","reasoning":"R","tool_calls":[
+			{"id":"call_z","type":"function","function":{"name":"f","arguments":"{}"}}
+		]},"finish_reason":"tool_calls"}]
+	}`)
+	var got string
+	if _, err := ChatToResponsesResponseWith(body, ResponseConvertOptions{
+		OnReasoning: func(reasoning string, callIDs []string) { got = reasoning },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got != "R" {
+		t.Fatalf("非流式 reasoning 别名未解析: %q", got)
 	}
 }

@@ -37,10 +37,12 @@ func readSSE(r io.Reader, fn func(event string, data []byte) error) error {
 			}
 		}
 		if err != nil {
+			// 上游中断时也把已累积的数据交给回调：调用方会忽略无法解析的块，
+			// 但完整的最后一块（例如工具调用）不该丢。
+			if len(data) > 0 {
+				_ = fn(event, data)
+			}
 			if err == io.EOF {
-				if len(data) > 0 {
-					_ = fn(event, data)
-				}
 				return nil
 			}
 			return err
@@ -414,32 +416,6 @@ func StreamChatToResponsesWith(r io.Reader, w io.Writer, flush func(), opts Resp
 			},
 		}); err != nil {
 			return err
-		}
-	}
-
-	// 思考内容回调：仅在本次响应确实产生了工具调用时才有意义（供后续请求回填）。
-	if opts.OnReasoning != nil && reasoning.Len() > 0 {
-		ids := make([]string, 0, len(order))
-		for _, item := range order {
-			if item.kind != "message" {
-				ids = append(ids, item.callID)
-			}
-		}
-		if len(ids) > 0 {
-			opts.OnReasoning(reasoning.String(), ids)
-		}
-	}
-
-	// 思考内容回调：仅在本次响应确实产生了工具调用时才有意义（供后续请求回填）。
-	if opts.OnReasoning != nil && reasoning.Len() > 0 {
-		ids := make([]string, 0, len(order))
-		for _, item := range order {
-			if item.kind != "message" {
-				ids = append(ids, item.callID)
-			}
-		}
-		if len(ids) > 0 {
-			opts.OnReasoning(reasoning.String(), ids)
 		}
 	}
 

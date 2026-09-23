@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// reasoningPlaceholder 是思考内容缓存未命中时的回填文本。
+// 上游只校验字段存在与（部分网关要求的）非空，不校验内容本身；
+// 用固定占位而不是回放其他轮次的推理，避免把过期推理注入上下文。
+const reasoningPlaceholder = "(reasoning omitted)"
+
 // reasoningCache 缓存上游思考内容。
 // DeepSeek 等思考型上游要求把上一轮的 reasoning_content 在下一轮带 tool_calls
 // 的 assistant 消息里回传，而 Responses 协议没有等价字段，

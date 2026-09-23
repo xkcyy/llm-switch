@@ -473,7 +473,7 @@ Chat Completions 的硬约束是「带 `tool_calls` 的 assistant 消息必须�
 
 1. **合并工具调用**：连续的 `function_call` / `custom_tool_call` 合并到同一条 assistant 消息的 `tool_calls` 数组，再按调用顺序紧跟 tool 消息；
 2. **结果配对**：工具结果按 `call_id` 索引，跨消息也能并回对应的 assistant 消息之后；缺结果补占位、孤立结果丢弃并写入告警（`Record.warnings`）；
-3. **思考内容回传**：思考型上游（DeepSeek 等）要求下一轮把 `reasoning_content` 原样带回。代理按「供应商 + 模型 + 工具调用 ID」缓存 30 分钟并在构造 assistant 消息时回填；冷缓存时对已知思考型供应商写空字符串，保证请求合法；
+3. **思考内容回传**：思考型上游（DeepSeek 等）要求下一轮把 `reasoning_content` 原样带回。实测规则：每个带 `tool_calls` 的 assistant 消息都必须带该字段（缺失即 400，覆盖历史里的每一组），且部分网关把空串视为未回传。代理按「供应商 + 模型 + 工具调用 ID」缓存 6 小时（单条 64KB、总量 32MB 上限，超限按写入顺序淘汰）并回填；未命中时回填**非空占位文本** `(reasoning omitted)`。流式中断时也把已捕获的推理内容落缓存，并兼容 `delta.reasoning`（OpenRouter 风格）别名；
 4. **自定义工具桥接**：Codex 桌面版的自定义（自由文本）工具降级为「单个 `input` 字符串」的函数工具传给上游；上游返回同名调用时还原为 `custom_tool_call`（`response.custom_tool_call_input.*` 事件），避免 Codex 无法识别。
 
 ### 9.6 已知限制
@@ -481,6 +481,7 @@ Chat Completions 的硬约束是「带 `tool_calls` 的 assistant 消息必须�
 - 跨协议转换下 `previous_response_id`、`include` 等有状态/原生特性不适用（原生直通时原样透传）。
 - 图片等多模态内容仅在直通场景保证；跨协议转换不支持。
 - 推理等级无法一一对应时按最接近档位映射，并在日志中记录降级。
+- 思考内容缓存是进程内内存态：代理重启后回退为占位文本（请求仍然合法）；占位文本与真实推理不等价，仅供上游校验与上下文连贯。
 - 自定义工具的降级桥接要求模型遵守「完整内容放进 `input`」的参数约定；未遵守时按原样透传字符串。
 
 ## 10. Codex 配置同步（按实测结构）

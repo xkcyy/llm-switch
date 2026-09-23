@@ -18,6 +18,13 @@ func newTestProxy(t *testing.T, upstream string) *httptest.Server {
 
 func newTestProxyWith(t *testing.T, upstream string, modify func(*config.Config)) *httptest.Server {
 	t.Helper()
+	ts, _ := newTestProxyServer(t, upstream, modify)
+	return ts
+}
+
+// newTestProxyServer 同时返回代理实例，便于断言记录（Record）。
+func newTestProxyServer(t *testing.T, upstream string, modify func(*config.Config)) (*httptest.Server, *Server) {
+	t.Helper()
 	store, err := config.Open(filepath.Join(t.TempDir(), "config.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +48,17 @@ func newTestProxyWith(t *testing.T, upstream string, modify func(*config.Config)
 	srv := NewServer(store, index)
 	ts := httptest.NewServer(srv.mux())
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, srv
+}
+
+// lastRecord 返回最近一条代理记录。
+func lastRecord(t *testing.T, srv *Server) Record {
+	t.Helper()
+	recs := srv.Recent(1)
+	if len(recs) == 0 {
+		t.Fatal("没有代理记录")
+	}
+	return recs[0]
 }
 
 func TestProxyModelProtocolOverride(t *testing.T) {
@@ -391,7 +408,7 @@ func TestProxyReasoningEcho(t *testing.T) {
 	}
 }
 
-// 冷缓存 + 已知思考型供应商：仍要写入 reasoning_content 字段（可为空），避免上游 400。
+// 冷缓存 + 已知思考型供应商：必须写入非空 reasoning_content（部分网关把空串视为未回传）。
 func TestProxyReasoningColdCacheFallback(t *testing.T) {
 	var lastBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -414,7 +431,82 @@ func TestProxyReasoningColdCacheFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if !strings.Contains(lastBody, `"reasoning_content":""`) {
-		t.Fatalf("冷缓存未兜底写入 reasoning_content: %s", lastBody)
+
+	var sent struct {
+		Messages []struct {
+			Role             string `json:"role"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(lastBody), &sent); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range sent.Messages {
+		if m.Role != "assistant" {
+			continue
+		}
+		found = true
+		if strings.TrimSpace(m.ReasoningContent) == "" {
+			t.Fatalf("冷缓存必须回填非空占位: %s", lastBody)
+		}
+	}
+	if !found {
+		t.Fatalf("未找到 assistant 消息: %s", lastBody)
+	}
+}
+
+// 非思考型供应商不应被塞入 reasoning_content（避免未知字段被严格网关拒绝）。
+func TestProxyReasoningSkippedForPlainProvider(t *testing.T) {
+	var lastBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		lastBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	ts := newTestProxyWith(t, upstream.URL, func(c *config.Config) {
+		c.Providers[0].Preset = "custom"
+		c.Providers[0].BaseURL = upstream.URL + "/v1"
+	})
+	body := `{"model":"deepseek/deepseek-chat","stream":false,"input":[
+		{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"call_x"},
+		{"type":"function_call_output","call_id":"call_x","output":"done"}
+	]}`
+	resp, err := http.Post(ts.URL+"/v1/responses", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if strings.Contains(lastBody, "reasoning_content") {
+		t.Fatalf("普通供应商不应写入 reasoning_content: %s", lastBody)
+	}
+}
+
+// 上游 4xx：记录里要有错误体摘要与 request id，便于定位。
+func TestProxyLogsUpstreamErrorDetail(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-request-id", "req-123")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"message":"The reasoning_content in the thinking mode must be passed back to the API.","type":"invalid_request_error"}}`))
+	}))
+	defer upstream.Close()
+
+	ts, srv := newTestProxyServer(t, upstream.URL, nil)
+	resp, err := http.Post(ts.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"deepseek/deepseek-chat","input":"ping"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	rec := lastRecord(t, srv)
+	if !strings.Contains(rec.Error, "reasoning_content") || !strings.Contains(rec.Error, "req-123") {
+		t.Fatalf("错误摘要不完整: %q", rec.Error)
+	}
+	if rec.Session == "" {
+		t.Fatalf("记录缺少会话标识: %+v", rec)
 	}
 }
