@@ -1,6 +1,8 @@
 # 构建产物
-dist/
+dist/*
 *.exe
+# 发行版安装包纳入版本库，随源码一起分发
+!dist/LLM-Switch.exe
 
 # 本地运行产物
 *.tmp
