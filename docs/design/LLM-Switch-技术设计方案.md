@@ -399,30 +399,17 @@ plainIndex    map[string][]*Model           // model.id → 多个模型（用�
 
 ## 9. 协议适配层
 
-### 9.1 统一中间表示（IR）
+### 9.1 中间表示（IR）
 
-字段命名对齐 OpenAI / Anthropic 术语；同协议直通不经过 IR：
+转换路径（入口协议 ≠ 上游协议）经过一份中间表示；同协议直通不经过 IR，原样转发。
 
-```go
-type UnifiedRequest struct {
-    Model             string
-    Instructions      string      // responses.instructions / chat system / messages.system
-    Input             []Item      // messages / input items / tool results
-    Tools             []Tool
-    ToolChoice        any
-    ParallelToolCalls *bool
-    Stream            bool
-    MaxOutputTokens   *int        // chat: max_tokens / responses: max_output_tokens / messages: max_tokens
-    Temperature       *float64
-    TopP              *float64
-    Stop              []string
-    ReasoningEffort   string      // responses.reasoning.effort / messages.thinking
-    ReasoningSummary  string
-    Verbosity         string
-    TextFormat        any         // chat: response_format / responses: text.format
-    Store             *bool
-}
-```
+- **词汇对齐 Responses**：IR 的条目与流式事件沿用 Responses 的词汇（`message` / `function_call` / `function_call_output` / `custom_tool_call` / `reasoning` 条目，`response.*` 事件），不另立中立术语。
+- **形态是 Go 类型**：IR 是内存模型，三种协议的线格式只作为编解码产物；流式是增量事件，字节无法表达。
+- **字段集严格等于 Responses 公开字段**：不为上游私有字段开扩展槽。Responses 没有槽位的信息（Chat 的 `reasoning_content` 回传、Anthropic 的 `thinking.signature` 回传）走转换模块内部的侧信道缓存，见 §9.5。
+- **每个协议一组适配器**：请求、响应、流三层各一个解码器与一个编码器，成对转换函数不再存在；新增协议只增加一组适配器，不增加方向。
+- **迁移状态**：Chat ↔ Responses 已按上述形态落地（`internal/proxy/protocol/codec_chat.go`、`codec_responses.go`、`relay.go`）；Messages 上游暂时仍走成对函数（relay.go 里的 legacy 桥），按 §9.2 的顺序迁移。
+
+直通路径不受 IR 影响：`store`、`include`、`prompt_cache_key`、`text.verbosity`、custom tools、推理条目等仍原样透传。
 
 ### 9.2 转换矩阵（MVP）
 
@@ -464,7 +451,7 @@ type UnifiedRequest struct {
 | 流式事件 | `choices[].delta` | `response.*.delta` | `content_block_delta` |
 | 结束原因 | `finish_reason` | `status` / `incomplete_details` | `stop_reason` |
 | 用量 | `usage.*_tokens` | `usage.input_tokens/output_tokens` | 同 responses |
-| 思考内容 | `reasoning_content` | `reasoning` 条目（透传保留） | `thinking`（透传保留） |
+| 思考内容 | `reasoning_content` | `reasoning` 条目（summary 承载文本） | `thinking`（透传保留） |
 | 自定义工具 | `tools[].type=function`（降级为单 `input` 字符串参数） | `tools[].type=custom` / `custom_tool_call` | 暂未桥接（条目被忽略，可按同样方式降级） |
 
 ### 9.5 转换实现约定（Responses → Chat）
@@ -473,7 +460,11 @@ Chat Completions 的硬约束是「带 `tool_calls` 的 assistant 消息必须�
 
 1. **合并工具调用**：连续的 `function_call` / `custom_tool_call` 合并到同一条 assistant 消息的 `tool_calls` 数组，再按调用顺序紧跟 tool 消息；
 2. **结果配对**：工具结果按 `call_id` 索引，跨消息也能并回对应的 assistant 消息之后；缺结果补占位、孤立结果丢弃并写入告警（`Record.warnings`）；
-3. **思考内容回传**：思考型上游（DeepSeek 等）要求下一轮把 `reasoning_content` 原样带回。实测规则：每个带 `tool_calls` 的 assistant 消息都必须带该字段（缺失即 400，覆盖历史里的每一组），且部分网关把空串视为未回传。代理按「供应商 + 模型 + 工具调用 ID」缓存 6 小时（单条 64KB、总量 32MB 上限，超限按写入顺序淘汰）并回填；未命中时回填**非空占位文本** `(reasoning omitted)`。流式中断时也把已捕获的推理内容落缓存，并兼容 `delta.reasoning`（OpenRouter 风格）别名；
+3. **思考内容回传（标准路径优先）**：思考型上游（DeepSeek 等）要求下一轮把 `reasoning_content` 原样带回。实测规则：每个带 `tool_calls` 的 assistant 消息都必须带该字段（缺失即 400，覆盖历史里的每一组）；2026-09-23 对 opencode.ai/zen 的对照实验进一步确认——该网关按会话路由到自己的推理状态，命中时忽略客户端回填值，未命中（换会话 ID、重启等）时要求客户端补上该字段，**缺字段必 400，非空占位可通过**。
+   - 标准路径：上游的推理文本按 Responses 原生的 `reasoning` 条目下发（文本放 `summary[].text`，与 OpenAI 的 reasoning summary 同形），客户端下一轮原样回传，转换时从回传条目里取文本回填。跨进程有效，不依赖任何代理侧状态。
+   - 兜底一（缓存）：按「供应商 + 模型 + 工具调用 ID」缓存 6 小时（单条 64KB、总量 32MB 上限，超限按写入顺序淘汰），覆盖客户端尚未回传的窗口期。流式中断时也落缓存。
+   - 兜底二（占位）：两者都未命中时回填**非空占位文本** `(reasoning omitted)`，并写入告警。
+   - 兼容 `delta.reasoning`（OpenRouter 风格）别名；
 4. **自定义工具桥接**：Codex 桌面版的自定义（自由文本）工具降级为「单个 `input` 字符串」的函数工具传给上游；上游返回同名调用时还原为 `custom_tool_call`（`response.custom_tool_call_input.*` 事件），避免 Codex 无法识别。
 
 ### 9.6 已知限制
@@ -483,6 +474,20 @@ Chat Completions 的硬约束是「带 `tool_calls` 的 assistant 消息必须�
 - 推理等级无法一一对应时按最接近档位映射，并在日志中记录降级。
 - 思考内容缓存是进程内内存态：代理重启后回退为占位文本（请求仍然合法）；占位文本与真实推理不等价，仅供上游校验与上下文连贯。
 - 自定义工具的降级桥接要求模型遵守「完整内容放进 `input`」的参数约定；未遵守时按原样透传字符串。
+
+### 9.7 兼容扩展
+
+供应商怪癖（必须回传 `reasoning_content`、会话标识用哪个头名、网关额外要求的请求头）不写在核心路径里，集中为**兼容扩展**（`internal/proxy/protocol/compat/`）。
+
+- **边界**：协议自身固有的行为（Anthropic 的 `anthropic-version`、产品自标识 User-Agent）留在编解码器与调用方；只有供应商特有的怪癖进扩展。
+- **机制**（`compat.go` + `registry.go`）：扩展是对象（`Extension` = 名字 + `Match`），时机点由机制定义，干什么由扩展自己决定；机制侧只按接口类型查找，不认识具体扩展。
+  - 当前时机点：`BeforeRequest(*Request) error`——上游请求发出前（认证之后）调用，扩展在这里改请求头（`Request.HTTP`）与请求体（`Request.Body`）。`Request` 还提供会话标识、`LookupReasoning`（真实思考内容查询）与告警出口。
+  - 新增一个时机点 = 新增一个接口 + 核心侧一个调用点，既有扩展不受影响。
+- **实例**（`ext_*.go`，一个文件一条，`init` 自注册）：
+  - `reasoning-echo`：在发往 Chat 上游的请求体里，给每条带 `tool_calls` 的 assistant 消息补上非空 `reasoning_content`（缺失即 400）。优先用真实思考内容（代理侧缓存或客户端回传的 `reasoning` 条目），拿不到才回填占位文本并写入告警。自动匹配 preset 为 `deepseek`/`opencode-go`，或 base_url 含 `deepseek`/`opencode.ai`。
+  - `opencode-go`：把会话标识写进 `x-opencode-session` 请求头（opencode.ai/zen 缺该头直接判 `MissingSessionID`），也是该供应商后续怪癖的落点。
+- **显式挂载**：供应商配置 `extensions: ["reasoning-echo"]`，用于自动匹配判不出来的场景（自建 DeepSeek 兼容网关）。未知名字不生效，但会写进代理记录的告警。
+- **新增怪癖**：在内置目录加一条 `Extension` 即可，不改核心路径。
 
 ## 10. Codex 配置同步（按实测结构）
 

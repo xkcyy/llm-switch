@@ -20,6 +20,8 @@ import (
 	"llm-switch/internal/buildinfo"
 	"llm-switch/internal/config"
 	"llm-switch/internal/proxy/protocol"
+	"llm-switch/internal/proxy/protocol/compat"
+	"llm-switch/internal/upstream"
 )
 
 const maxBodyBytes = 32 << 20
@@ -61,8 +63,6 @@ type Server struct {
 	index  *Holder
 	client *http.Client
 
-	reasoning *reasoningCache
-
 	mu      sync.Mutex
 	srv     *http.Server
 	ln      net.Listener
@@ -83,10 +83,9 @@ func NewServer(store *config.Store, index *Holder) *Server {
 		ForceAttemptHTTP2:     true,
 	}
 	return &Server{
-		store:     store,
-		index:     index,
-		client:    &http.Client{Transport: transport},
-		reasoning: newReasoningCache(),
+		store:  store,
+		index:  index,
+		client: &http.Client{Transport: transport},
 	}
 }
 
@@ -220,15 +219,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		OwnedBy string `json:"owned_by"`
 	}
 	data := []item{}
-	for _, m := range cfg.Models {
-		if !m.Enabled {
-			continue
-		}
-		p, ok := cfg.FindProvider(m.ProviderID)
-		if !ok || !p.Enabled {
-			continue
-		}
-		data = append(data, item{ID: p.ID + "/" + m.ID, Object: "model", OwnedBy: p.Name})
+	for _, a := range cfg.AvailableModels() {
+		data = append(data, item{ID: a.Slug, Object: "model", OwnedBy: a.Provider.Name})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
@@ -242,20 +234,20 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	if !isLoopback(r.RemoteAddr) {
 		rec.Status, rec.Error = 403, "非本机来源"
 		s.log(rec)
-		writeProtocolError(w, entry, 403, "仅允许本机访问")
+		protocol.WriteError(w, entry, 403, "仅允许本机访问")
 		return
 	}
 	if r.Method != http.MethodPost {
 		rec.Status, rec.Error = 405, "方法不支持"
 		s.log(rec)
-		writeProtocolError(w, entry, 405, "仅支持 POST")
+		protocol.WriteError(w, entry, 405, "仅支持 POST")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
 		rec.Status, rec.Error = 400, "读取请求体失败"
 		s.log(rec)
-		writeProtocolError(w, entry, 400, "读取请求体失败: "+err.Error())
+		protocol.WriteError(w, entry, 400, "读取请求体失败: "+err.Error())
 		return
 	}
 	var head struct {
@@ -268,7 +260,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	if strings.TrimSpace(head.Model) == "" {
 		rec.Status, rec.Error = 400, "缺少模型名称"
 		s.log(rec)
-		writeProtocolError(w, entry, 400, "缺少模型名称")
+		protocol.WriteError(w, entry, 400, "缺少模型名称")
 		return
 	}
 	match, err := s.index.Load().Resolve(head.Model)
@@ -279,7 +271,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 		}
 		rec.Status, rec.Error = status, err.Error()
 		s.log(rec)
-		writeProtocolError(w, entry, status, err.Error())
+		protocol.WriteError(w, entry, status, err.Error())
 		return
 	}
 	rec.Provider = match.Provider.Name
@@ -290,52 +282,42 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	if err != nil {
 		rec.Status, rec.Error = 400, err.Error()
 		s.log(rec)
-		writeProtocolError(w, entry, 400, err.Error())
+		protocol.WriteError(w, entry, 400, err.Error())
 		return
 	}
 	rec.Upstream = string(up)
 	rec.Converted = up != entry
 
-	var customTools map[string]bool
-	if entry == protocol.Responses && up != protocol.Responses {
-		customTools = protocol.CustomToolNames(body)
+	// 兼容扩展：内置自动匹配 + 供应商显式声明。供应商怪癖集中在这里，不散在核心路径。
+	extUpstream := compat.Upstream{
+		ProviderID: match.Provider.ID, Preset: match.Provider.Preset,
+		BaseURL: match.Provider.BaseURL, ModelID: match.Model.ID,
 	}
-	chatOpts := protocol.ChatConvertOptions{
-		OnWarning: func(msg string) { rec.Warnings = append(rec.Warnings, msg) },
-	}
-	if up == protocol.Chat {
-		// 思考型上游（DeepSeek 等）要求把 reasoning_content 原样回传；
-		// 缓存未命中时回填非空占位，兼顾「字段必须存在」与「部分网关要求非空」。
-		placeholderUsed := false
-		chatOpts.Reasoning = func(callID string) (string, bool) {
-			if text, ok := s.reasoning.get(match.Provider.ID, match.Model.ID, callID); ok {
-				return text, true
-			}
-			if needsReasoningEcho(match) {
-				if !placeholderUsed {
-					placeholderUsed = true
-					rec.Warnings = append(rec.Warnings, "思考内容缓存未命中，已回填占位文本（不影响请求合法性）")
-				}
-				return reasoningPlaceholder, true
-			}
-			return "", false
-		}
+	plan := compat.New(extUpstream, match.Provider.Extensions)
+	var planWarnings []string
+	if unknown := plan.Unknown(); len(unknown) > 0 {
+		planWarnings = append(planWarnings, fmt.Sprintf("未知的兼容扩展 %s（已忽略）", strings.Join(unknown, "、")))
 	}
 
-	upstreamBody, err := convertRequest(entry, up, body, match.Model.ID, chatOpts)
+	// 请求侧转换：解码客户端请求 → IR → 编码上游请求。
+	// 转换只做协议本身的事：供应商怪癖交给兼容扩展（下方 plan.Apply）。
+	relay, upstreamBody, err := protocol.Prepare(entry, up, body, protocol.Identity{
+		ProviderID: match.Provider.ID,
+		ModelID:    match.Model.ID,
+	})
 	if err != nil {
 		rec.Status, rec.Error = 400, err.Error()
 		s.log(rec)
-		writeProtocolError(w, entry, 400, err.Error())
+		protocol.WriteError(w, entry, 400, err.Error())
 		return
 	}
 
-	url := joinURL(match.Provider.BaseURL, up.UpstreamPath())
+	url := upstream.URL(match.Provider.BaseURL, up.UpstreamPath())
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(upstreamBody))
 	if err != nil {
 		rec.Status, rec.Error = 500, err.Error()
 		s.log(rec)
-		writeProtocolError(w, entry, 500, "构建上游请求失败")
+		protocol.WriteError(w, entry, 500, "构建上游请求失败")
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -345,12 +327,27 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	}
 	// 自我标识（OpenCode Go 要求自定义 UA，而非通用 HTTP 库名）
 	req.Header.Set("User-Agent", buildinfo.UserAgent())
-	// 会话标识：优先透传客户端已有的会话头，其次用「模型 + 首条用户消息」生成稳定值。
-	// OpenCode Go 依赖 x-opencode-session 做路由与提示缓存亲和。
-	if rec.Session != "" {
-		req.Header.Set("x-opencode-session", rec.Session)
+	upstream.SetAuth(req, match.Provider, up)
+	// 兼容扩展：在认证之后、发出之前做各自的事（补请求头、补请求体字段等）。
+	extReq := &compat.Request{
+		Upstream:         extUpstream,
+		UpstreamProtocol: up,
+		HTTP:             req,
+		Body:             upstreamBody,
+		Session:          rec.Session,
+		LookupReasoning:  relay.LookupReasoning,
+		Warn:             func(format string, args ...any) { planWarnings = append(planWarnings, fmt.Sprintf(format, args...)) },
 	}
-	applyAuth(req, match.Provider, up)
+	if err := plan.Apply(extReq); err != nil {
+		rec.Status, rec.Error = 500, "兼容扩展处理失败: "+err.Error()
+		s.log(rec)
+		protocol.WriteError(w, entry, 500, "兼容扩展处理失败")
+		return
+	}
+	if !bytes.Equal(extReq.Body, upstreamBody) {
+		req.Body = io.NopCloser(bytes.NewReader(extReq.Body))
+		req.ContentLength = int64(len(extReq.Body))
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -364,86 +361,23 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 		rec.Status, rec.Error = status, msg
 		s.log(rec)
 		if status != 499 {
-			writeProtocolError(w, entry, status, msg)
+			protocol.WriteError(w, entry, status, msg)
 		}
 		return
 	}
 	defer resp.Body.Close()
 	rec.Status = resp.StatusCode
 
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		rec.Error = fmt.Sprintf("上游 HTTP %d: %s", resp.StatusCode, upstreamErrorSummary(b, resp))
-		s.log(rec)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		w.Write(protocol.ConvertErrorBody(entry, resp.StatusCode, b))
-		return
+	// 响应侧转换：上游错误体、流式事件、非流式响应与直通都在转换模块里收口。
+	out, derr := relay.Deliver(resp.StatusCode, resp.Header, resp.Body, w)
+	rec.Warnings = append(out.Warnings, planWarnings...)
+	if out.UpstreamBody != nil {
+		rec.Error = fmt.Sprintf("上游 HTTP %d: %s", out.UpstreamStatus, upstreamErrorSummary(out.UpstreamBody, resp))
 	}
-
-	respOpts := protocol.ResponseConvertOptions{
-		CustomTools: customTools,
-		OnWarning:   func(msg string) { rec.Warnings = append(rec.Warnings, msg) },
+	if derr != nil && !errors.Is(derr, context.Canceled) {
+		rec.Error = "流式转换中断: " + derr.Error()
+		slog.Warn("流式转换中断", "error", derr)
 	}
-	if entry == protocol.Responses && up == protocol.Chat {
-		respOpts.OnReasoning = func(reasoning string, callIDs []string) {
-			s.reasoning.store(match.Provider.ID, match.Model.ID, callIDs, reasoning)
-		}
-	}
-
-	streaming := head.Stream && strings.Contains(resp.Header.Get("Content-Type"), "event-stream")
-	if streaming {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.WriteHeader(resp.StatusCode)
-		flusher, _ := w.(http.Flusher)
-		flush := func() {
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-		var terr error
-		if entry == up {
-			terr = passthroughStream(resp.Body, w, flush)
-		} else {
-			terr = streamTransform(entry, up, resp.Body, w, flush, respOpts)
-		}
-		if terr != nil && !errors.Is(terr, context.Canceled) {
-			rec.Error = "流式转换中断: " + terr.Error()
-			slog.Warn("流式转换中断", "error", terr)
-		}
-		rec.DurationMS = time.Since(start).Milliseconds()
-		s.log(rec)
-		return
-	}
-
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if err != nil {
-		rec.Error = "读取上游响应失败"
-		rec.DurationMS = time.Since(start).Milliseconds()
-		s.log(rec)
-		writeProtocolError(w, entry, http.StatusBadGateway, "读取上游响应失败")
-		return
-	}
-	if entry != up {
-		converted, err := convertResponse(entry, up, b, respOpts)
-		if err != nil {
-			rec.Error = err.Error()
-			rec.DurationMS = time.Since(start).Milliseconds()
-			s.log(rec)
-			writeProtocolError(w, entry, 502, err.Error())
-			return
-		}
-		b = converted
-	}
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	} else {
-		w.Header().Set("Content-Type", "application/json")
-	}
-	w.WriteHeader(resp.StatusCode)
-	w.Write(b)
 	rec.DurationMS = time.Since(start).Milliseconds()
 	s.log(rec)
 }
@@ -491,72 +425,6 @@ func upstreamErrorSummary(body []byte, resp *http.Response) string {
 		msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}
 	return msg
-}
-
-// ---- 协议分发 ----
-
-func convertRequest(entry, up protocol.Protocol, body []byte, model string, opts protocol.ChatConvertOptions) ([]byte, error) {
-	if entry == up {
-		return protocol.PatchModel(body, model)
-	}
-	switch {
-	case entry == protocol.Responses && up == protocol.Chat:
-		return protocol.ResponsesToChatRequestWith(body, model, opts)
-	case entry == protocol.Responses && up == protocol.Messages:
-		return protocol.ResponsesToMessagesRequest(body, model)
-	case entry == protocol.Chat && up == protocol.Messages:
-		return protocol.ChatToMessagesRequest(body, model)
-	case entry == protocol.Chat && up == protocol.Responses:
-		return protocol.ChatToResponsesRequest(body, model)
-	}
-	return nil, fmt.Errorf("协议不兼容：%s 入口暂不支持 %s 上游", entry, up)
-}
-
-func convertResponse(entry, up protocol.Protocol, body []byte, opts protocol.ResponseConvertOptions) ([]byte, error) {
-	switch {
-	case entry == protocol.Responses && up == protocol.Chat:
-		return protocol.ChatToResponsesResponseWith(body, opts)
-	case entry == protocol.Responses && up == protocol.Messages:
-		return protocol.MessagesToResponsesResponse(body)
-	case entry == protocol.Chat && up == protocol.Messages:
-		return protocol.MessagesToChatResponse(body)
-	case entry == protocol.Chat && up == protocol.Responses:
-		return protocol.ResponsesToChatResponse(body)
-	}
-	return nil, fmt.Errorf("协议不兼容：暂不支持 %s 上游响应转换为 %s", up, entry)
-}
-
-func streamTransform(entry, up protocol.Protocol, r io.Reader, w io.Writer, flush func(), opts protocol.ResponseConvertOptions) error {
-	switch {
-	case entry == protocol.Responses && up == protocol.Chat:
-		return protocol.StreamChatToResponsesWith(r, w, flush, opts)
-	case entry == protocol.Responses && up == protocol.Messages:
-		return protocol.StreamMessagesToResponses(r, w, flush)
-	case entry == protocol.Chat && up == protocol.Responses:
-		return protocol.StreamResponsesToChat(r, w, flush)
-	case entry == protocol.Chat && up == protocol.Messages:
-		return protocol.StreamMessagesToChat(r, w, flush)
-	}
-	return fmt.Errorf("协议不兼容：暂不支持 %s → %s 流式转换", up, entry)
-}
-
-func passthroughStream(r io.Reader, w io.Writer, flush func()) error {
-	buf := make([]byte, 16<<10)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return werr
-			}
-			flush()
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return err
-		}
-	}
 }
 
 // ---- 辅助 ----
@@ -655,48 +523,4 @@ func isLoopback(remoteAddr string) bool {
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	return ip != nil && ip.IsLoopback()
-}
-
-func joinURL(base, suffix string) string {
-	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(suffix, "/")
-}
-
-func applyAuth(req *http.Request, p config.Provider, proto protocol.Protocol) {
-	switch p.Auth.Type {
-	case "api_key_header", "custom":
-		h := p.Auth.Header
-		if h == "" {
-			h = "x-api-key"
-		}
-		if p.Auth.APIKey != "" {
-			req.Header.Set(h, p.Auth.APIKey)
-		}
-	case "bearer", "":
-		if p.Auth.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+p.Auth.APIKey)
-		}
-	}
-	if proto == protocol.Messages && req.Header.Get("anthropic-version") == "" {
-		req.Header.Set("anthropic-version", "2023-06-01")
-	}
-}
-
-func writeProtocolError(w http.ResponseWriter, entry protocol.Protocol, status int, message string) {
-	var body []byte
-	if entry == protocol.Messages {
-		t := "invalid_request_error"
-		if status == http.StatusNotFound {
-			t = "not_found_error"
-		}
-		body, _ = json.Marshal(map[string]any{"type": "error", "error": map[string]any{"type": t, "message": message}})
-	} else {
-		t := "invalid_request_error"
-		if status >= 500 {
-			t = "api_error"
-		}
-		body, _ = json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": t, "code": nil}})
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	w.Write(body)
 }

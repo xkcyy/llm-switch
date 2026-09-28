@@ -59,6 +59,22 @@ type textPart struct {
 	Text string `json:"text"`
 }
 
+// imagePart 兼容三种协议里的图片内容块：
+// Responses 的 input_image（image_url 为字符串）、Chat 的 image_url（字符串或对象）、
+// Messages 的 image（不在请求解码路径上，仅解码 Responses/Chat 用不到）。
+type imagePart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text"`
+	ImageURL json.RawMessage `json:"image_url"`
+	Detail   string          `json:"detail"`
+}
+
+// imageURLObj 是 Chat 的 image_url 对象写法：{"url": "...", "detail": "auto"}。
+type imageURLObj struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail"`
+}
+
 // textOf 从 string 或内容块数组提取纯文本。
 func textOf(raw json.RawMessage) string {
 	if len(raw) == 0 || string(raw) == "null" {
@@ -81,6 +97,204 @@ func textOf(raw json.RawMessage) string {
 	return ""
 }
 
+// splitResponsesContent 解析 Responses 的 content：返回文本与图片。
+// content 允许是纯字符串或内容块数组；无法识别的块按文本字段兜底。
+func splitResponsesContent(raw json.RawMessage) (string, []irImage) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, nil
+	}
+	var parts []imagePart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return textOf(raw), nil
+	}
+	var b strings.Builder
+	var images []irImage
+	for _, p := range parts {
+		switch p.Type {
+		case "input_image", "image_url", "image":
+			if img, ok := decodeImagePart(p); ok {
+				images = append(images, img)
+			}
+		default:
+			if img, ok := decodeImagePart(p); ok {
+				images = append(images, img)
+				continue
+			}
+			b.WriteString(p.Text)
+		}
+	}
+	if b.Len() == 0 && len(images) == 0 {
+		// 兼容老结构：内容块数组里只有 text 字段
+		return textOf(raw), nil
+	}
+	return b.String(), images
+}
+
+// splitChatContent 解析 Chat 的 content：纯字符串、内容块数组或单个内容块对象。
+// 非字符串且非数组时保持 contentString 的旧行为（JSON 文本）。
+func splitChatContent(v any) (string, []irImage) {
+	switch c := v.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return c, nil
+	case []any:
+		var b strings.Builder
+		var images []irImage
+		for _, part := range c {
+			m, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			raw, _ := json.Marshal(m)
+			if img, ok := decodeImagePartRaw(raw); ok {
+				images = append(images, img)
+				continue
+			}
+			if t, _ := m["text"].(string); t != "" {
+				b.WriteString(t)
+			}
+		}
+		if b.Len() == 0 && len(images) == 0 {
+			return contentString(v), nil
+		}
+		return b.String(), images
+	case map[string]any:
+		raw, _ := json.Marshal(c)
+		if img, ok := decodeImagePartRaw(raw); ok {
+			return "", []irImage{img}
+		}
+		return contentString(v), nil
+	default:
+		return contentString(v), nil
+	}
+}
+
+// decodeImagePart 从已解码的内容块取图片；不是图片块时 ok=false。
+func decodeImagePart(p imagePart) (irImage, bool) {
+	if !isImageType(p.Type) {
+		return irImage{}, false
+	}
+	if len(p.ImageURL) == 0 {
+		return irImage{}, false
+	}
+	var s string
+	if err := json.Unmarshal(p.ImageURL, &s); err == nil {
+		if s == "" {
+			return irImage{}, false
+		}
+		return irImage{URL: s, Detail: p.Detail}, true
+	}
+	var obj imageURLObj
+	if err := json.Unmarshal(p.ImageURL, &obj); err != nil || obj.URL == "" {
+		return irImage{}, false
+	}
+	detail := obj.Detail
+	if detail == "" {
+		detail = p.Detail
+	}
+	return irImage{URL: obj.URL, Detail: detail}, true
+}
+
+func decodeImagePartRaw(raw json.RawMessage) (irImage, bool) {
+	var p imagePart
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return irImage{}, false
+	}
+	return decodeImagePart(p)
+}
+
+func isImageType(t string) bool {
+	switch t {
+	case "input_image", "image_url", "image":
+		return true
+	}
+	return false
+}
+
+// rawOf 把单个内容块包成完整 JSON，供 textOf 复用。
+// responsesContentParts 生成 Responses 的 content 内容块数组。
+func responsesContentParts(text string, images []irImage) []map[string]any {
+	parts := make([]map[string]any, 0, len(images)+1)
+	if text != "" || len(images) == 0 {
+		parts = append(parts, map[string]any{"type": "input_text", "text": text})
+	}
+	for _, img := range images {
+		part := map[string]any{"type": "input_image", "image_url": img.URL}
+		if img.Detail != "" {
+			part["detail"] = img.Detail
+		}
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+// chatContent 生成 Chat 的 content：无图片时保持纯字符串（与既有形态一致）。
+func chatContent(text string, images []irImage) any {
+	if len(images) == 0 {
+		return text
+	}
+	parts := make([]map[string]any, 0, len(images)+1)
+	if text != "" {
+		parts = append(parts, map[string]any{"type": "text", "text": text})
+	}
+	for _, img := range images {
+		url := map[string]any{"url": img.URL}
+		if img.Detail != "" {
+			url["detail"] = img.Detail
+		}
+		parts = append(parts, map[string]any{"type": "image_url", "image_url": url})
+	}
+	return parts
+}
+
+// messagesContentBlocks 生成 Messages 的 content 内容块数组：
+// data URI 转成 base64 图片块，其余地址按 URL 图片块。
+func messagesContentBlocks(text string, images []irImage) []any {
+	blocks := make([]any, 0, len(images)+1)
+	if text != "" || len(images) == 0 {
+		blocks = append(blocks, map[string]any{"type": "text", "text": text})
+	}
+	for _, img := range images {
+		blocks = append(blocks, messagesImageBlock(img))
+	}
+	return blocks
+}
+
+// messagesImageBlock 生成单个 Messages 图片块：data URI 转 base64，其余按 URL。
+func messagesImageBlock(img irImage) map[string]any {
+	if mediaType, data, ok := parseDataURI(img.URL); ok {
+		return map[string]any{
+			"type":   "image",
+			"source": map[string]any{"type": "base64", "media_type": mediaType, "data": data},
+		}
+	}
+	return map[string]any{
+		"type":   "image",
+		"source": map[string]any{"type": "url", "url": img.URL},
+	}
+}
+
+// parseDataURI 拆分 data:image/png;base64,xxxx 形式的地址。
+func parseDataURI(url string) (string, string, bool) {
+	if !strings.HasPrefix(url, "data:") {
+		return "", "", false
+	}
+	header, data, ok := strings.Cut(strings.TrimPrefix(url, "data:"), ",")
+	if !ok || !strings.Contains(header, ";base64") {
+		return "", "", false
+	}
+	mediaType := strings.TrimSuffix(header, ";base64")
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	return mediaType, data, true
+}
+
 func marshal(v any) ([]byte, error) { return json.Marshal(v) }
 
 // CanConvert 判断「入口协议 → 上游协议」是否存在可用的转换实现。
@@ -99,53 +313,6 @@ func CanConvert(entry, up Protocol) bool {
 		return true
 	}
 	return false
-}
-
-// ChatConvertOptions 控制 Responses → Chat 的转换细节。
-type ChatConvertOptions struct {
-	// Reasoning 返回某个工具调用对应的上游思考内容（DeepSeek 等思考模式要求回传）。
-	// 返回 ok=false 时不写入该字段。
-	Reasoning func(callID string) (string, bool)
-	// OnWarning 上报转换中的降级行为（如丢弃孤立工具结果），供日志与界面提示。
-	OnWarning func(string)
-}
-
-func (o ChatConvertOptions) warn(format string, args ...any) {
-	if o.OnWarning != nil {
-		o.OnWarning(fmt.Sprintf(format, args...))
-	}
-}
-
-// ResponseConvertOptions 控制「上游 → 入口」的响应转换细节。
-type ResponseConvertOptions struct {
-	// CustomTools 是本次请求中声明为 custom（自由文本）的工具名集合；
-	// 上游返回同名工具调用时按 custom_tool_call 下发，否则客户端无法识别。
-	CustomTools map[string]bool
-	// OnReasoning 在拿到上游思考内容时回调（推理文本 + 本次响应涉及的 call_id 列表）。
-	OnReasoning func(reasoning string, callIDs []string)
-	// OnWarning 上报降级行为。
-	OnWarning func(string)
-}
-
-func (o ResponseConvertOptions) warn(format string, args ...any) {
-	if o.OnWarning != nil {
-		o.OnWarning(fmt.Sprintf(format, args...))
-	}
-}
-
-// CustomToolNames 提取请求里声明为 custom（自由文本）的工具名。
-func CustomToolNames(body []byte) map[string]bool {
-	req, _, err := parseResponsesRequest(body)
-	if err != nil {
-		return nil
-	}
-	names := map[string]bool{}
-	for _, t := range req.Tools {
-		if t.Type == "custom" && t.Name != "" {
-			names[t.Name] = true
-		}
-	}
-	return names
 }
 
 // freeformArguments 把自由文本包装成上游函数调用参数。
@@ -207,6 +374,7 @@ type responsesInputItem struct {
 	Type      string          `json:"type"`
 	Role      string          `json:"role"`
 	Content   json.RawMessage `json:"content"`
+	Summary   json.RawMessage `json:"summary"`
 	Name      string          `json:"name"`
 	Arguments string          `json:"arguments"`
 	CallID    string          `json:"call_id"`
@@ -280,245 +448,6 @@ func parseResponsesRequest(body []byte) (*responsesRequest, []responsesInputItem
 		}
 	}
 	return &req, items, nil
-}
-
-func responsesToolsToChat(tools []responsesTool, opts ChatConvertOptions) []chatTool {
-	out := make([]chatTool, 0, len(tools))
-	for _, t := range tools {
-		switch t.Type {
-		case "", "function":
-			ct := chatTool{Type: "function"}
-			ct.Function.Name = t.Name
-			ct.Function.Description = t.Description
-			ct.Function.Parameters = t.Parameters
-			out = append(out, ct)
-		case "custom":
-			// 自定义（自由文本）工具降级为「单个 input 字符串」的函数工具，
-			// 否则上游模型看不到工具定义，历史里的调用与结果也会被丢弃。
-			ct := chatTool{Type: "function"}
-			ct.Function.Name = t.Name
-			desc := t.Description
-			if desc == "" {
-				desc = "Freeform tool."
-			}
-			ct.Function.Description = desc + " Provide the full content in the `input` string field."
-			ct.Function.Parameters = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string","description":"Full freeform input (raw text: script or patch)."}},"required":["input"]}`)
-			out = append(out, ct)
-		default:
-			opts.warn("忽略不支持的工具类型 %q（%s）", t.Type, t.Name)
-		}
-	}
-	return out
-}
-
-func responsesToolChoiceToChat(raw json.RawMessage) any {
-	if len(raw) == 0 {
-		return nil
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
-	}
-	var obj struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-	}
-	if json.Unmarshal(raw, &obj) == nil {
-		if obj.Name != "" {
-			return map[string]any{"type": "function", "function": map[string]any{"name": obj.Name}}
-		}
-		if obj.Type != "" {
-			return obj.Type
-		}
-	}
-	return nil
-}
-
-// ResponsesToChatRequest 把 Responses 请求转换为 Chat Completions 请求。
-func ResponsesToChatRequest(body []byte, model string) ([]byte, error) {
-	return ResponsesToChatRequestWith(body, model, ChatConvertOptions{})
-}
-
-// ResponsesToChatRequestWith 在转换时支持思考内容回填与降级告警。
-//
-// Chat Completions 要求：带 tool_calls 的 assistant 消息必须被对应 tool_call_id 的
-// tool 消息立即跟随。Codex 的一轮对话可能包含多个并行的工具调用，因此这里把连续的
-// 工具调用合并到同一条 assistant 消息，并让它与工具结果成组输出；孤立的结果条目会被
-// 丢弃并告警，避免上游 400。
-func ResponsesToChatRequestWith(body []byte, model string, opts ChatConvertOptions) ([]byte, error) {
-	req, items, err := parseResponsesRequest(body)
-	if err != nil {
-		return nil, err
-	}
-	out := chatRequest{
-		Model:             model,
-		Tools:             responsesToolsToChat(req.Tools, opts),
-		ToolChoice:        responsesToolChoiceToChat(req.ToolChoice),
-		ParallelToolCalls: req.ParallelToolCalls,
-		MaxTokens:         req.MaxOutputTokens,
-		Temperature:       req.Temperature,
-		TopP:              req.TopP,
-		Stream:            req.Stream,
-	}
-	if req.Reasoning != nil && req.Reasoning.Effort != "" && req.Reasoning.Effort != "none" {
-		out.ReasoningEffort = req.Reasoning.Effort
-	}
-	if out.Stream {
-		out.StreamOptions = &streamOptions{IncludeUsage: true}
-	}
-	if s := textOf(req.Instructions); s != "" {
-		out.Messages = append(out.Messages, chatMessage{Role: "system", Content: s})
-	}
-
-	// 工具结果索引：call_id → 结果文本；缺少 call_id 的按出现顺序排队，
-	// 供同样缺少 call_id 的工具调用按顺序配对。
-	results := map[string]string{}
-	var emptyIDResults []string
-	for _, it := range items {
-		switch it.Type {
-		case "function_call_output", "custom_tool_call_output":
-			if it.CallID == "" {
-				emptyIDResults = append(emptyIDResults, textOf(it.Output))
-			} else if _, ok := results[it.CallID]; !ok {
-				results[it.CallID] = textOf(it.Output)
-			}
-		}
-	}
-	consumed := map[string]bool{}
-	emptyConsumed, emptySeen := 0, 0
-
-	isDropped := func(t string) bool {
-		switch t {
-		case "reasoning", "web_search_call", "local_shell_call", "computer_call",
-			"ghost_snapshot", "mcp_call", "mcp_list_tools", "mcp_approval_request",
-			"mcp_approval_response", "code_interpreter_call", "image_generation_call":
-			return true
-		}
-		return false
-	}
-
-	for i := 0; i < len(items); i++ {
-		it := items[i]
-
-		// 工具调用：把紧随其后的连续调用条目合并成一条 assistant 消息。
-		if it.Type == "function_call" || it.Type == "custom_tool_call" {
-			type callItem struct {
-				id      string
-				name    string
-				args    string
-				virtual bool // 原始条目缺少 call_id，为合法成组临时生成
-			}
-			var calls []callItem
-			for i < len(items) {
-				cur := items[i]
-				switch {
-				case cur.Type == "function_call":
-					calls = append(calls, callItem{id: cur.CallID, name: cur.Name, args: cur.Arguments})
-				case cur.Type == "custom_tool_call":
-					calls = append(calls, callItem{id: cur.CallID, name: cur.Name, args: freeformArguments(cur.Input)})
-				case isDropped(cur.Type):
-					i++
-					continue
-				default:
-					goto groupDone
-				}
-				i++
-			}
-		groupDone:
-			i--
-
-			msg := chatMessage{Role: "assistant"}
-			virtualIDs := map[string]bool{}
-			for idx, c := range calls {
-				id := c.id
-				if id == "" {
-					id = fmt.Sprintf("call_%d_%s", idx, c.name)
-					c.virtual = true
-				}
-				if c.virtual {
-					virtualIDs[id] = true
-				}
-				var tc chatToolCall
-				tc.ID = id
-				tc.Type = "function"
-				tc.Function.Name = c.name
-				tc.Function.Arguments = c.args
-				msg.ToolCalls = append(msg.ToolCalls, tc)
-			}
-			// 思考型上游（DeepSeek 等）要求回传推理内容。
-			if opts.Reasoning != nil {
-				var fallback *string
-				for _, tc := range msg.ToolCalls {
-					text, ok := opts.Reasoning(tc.ID)
-					if !ok {
-						continue
-					}
-					if text != "" {
-						msg.ReasoningContent = &text
-						fallback = nil
-						break
-					}
-					if fallback == nil {
-						v := text
-						fallback = &v
-					}
-				}
-				if msg.ReasoningContent == nil {
-					msg.ReasoningContent = fallback
-				}
-			}
-			out.Messages = append(out.Messages, msg)
-
-			// 结果必须紧跟 assistant 消息，缺结果时补占位，避免上游拒绝。
-			for _, tc := range msg.ToolCalls {
-				text, ok := results[tc.ID]
-				switch {
-				case ok:
-					consumed[tc.ID] = true
-				case virtualIDs[tc.ID] && len(emptyIDResults) > emptyConsumed:
-					text, ok = emptyIDResults[emptyConsumed], true
-					emptyConsumed++
-				}
-				if !ok {
-					opts.warn("工具调用 %s（%s）缺少结果，已补空结果", tc.ID, tc.Function.Name)
-					text = "(no output)"
-				}
-				out.Messages = append(out.Messages, chatMessage{Role: "tool", ToolCallID: tc.ID, Content: text})
-			}
-			continue
-		}
-
-		switch it.Type {
-		case "", "message":
-			role := it.Role
-			if role == "developer" {
-				role = "system"
-			}
-			if role == "" {
-				role = "user"
-			}
-			out.Messages = append(out.Messages, chatMessage{Role: role, Content: textOf(it.Content)})
-		case "function_call_output", "custom_tool_call_output":
-			if it.CallID != "" {
-				if consumed[it.CallID] {
-					continue // 已随对应工具调用成组输出
-				}
-				opts.warn("丢弃没有对应工具调用的结果条目（call_id=%s）", it.CallID)
-				continue
-			}
-			emptySeen++
-			if emptySeen <= emptyConsumed {
-				continue
-			}
-			opts.warn("丢弃没有对应工具调用的结果条目（无 call_id）")
-		default:
-			// reasoning 等条目忽略
-		}
-	}
-	if len(out.Messages) == 0 {
-		out.Messages = []chatMessage{{Role: "user", Content: ""}}
-	}
-	return marshal(out)
 }
 
 // ---- 请求转换：Responses → Messages ----
@@ -644,8 +573,8 @@ func ResponsesToMessagesRequest(body []byte, model string) ([]byte, error) {
 			if role == "" {
 				role = "user"
 			}
-			text := textOf(it.Content)
-			out.Messages = append(out.Messages, messagesMessage{Role: role, Content: []any{map[string]any{"type": "text", "text": text}}})
+			text, images := splitResponsesContent(it.Content)
+			out.Messages = append(out.Messages, messagesMessage{Role: role, Content: messagesContentBlocks(text, images)})
 		case "function_call":
 			flushToolResults()
 			var input any
@@ -723,8 +652,12 @@ func ChatToMessagesRequest(body []byte, model string) ([]byte, error) {
 		case "assistant":
 			flush()
 			blocks := []any{}
-			if s := contentString(m.Content); s != "" {
+			text, images := splitChatContent(m.Content)
+			if s := text; s != "" {
 				blocks = append(blocks, map[string]any{"type": "text", "text": s})
+			}
+			for _, img := range images {
+				blocks = append(blocks, messagesImageBlock(img))
 			}
 			for _, tc := range m.ToolCalls {
 				var input any
@@ -737,7 +670,8 @@ func ChatToMessagesRequest(body []byte, model string) ([]byte, error) {
 			out.Messages = append(out.Messages, messagesMessage{Role: "assistant", Content: blocks})
 		default:
 			flush()
-			out.Messages = append(out.Messages, messagesMessage{Role: "user", Content: []any{map[string]any{"type": "text", "text": contentString(m.Content)}}})
+			text, images := splitChatContent(m.Content)
+			out.Messages = append(out.Messages, messagesMessage{Role: "user", Content: messagesContentBlocks(text, images)})
 		}
 	}
 	flush()
@@ -772,50 +706,16 @@ type simpleResponsesRequest struct {
 	Stream          bool             `json:"stream,omitempty"`
 }
 
-// ChatToResponsesRequest 把 Chat Completions 请求转换为 Responses 请求。
-func ChatToResponsesRequest(body []byte, model string) ([]byte, error) {
-	var req simpleChatRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, fmt.Errorf("解析 Chat 请求失败: %w", err)
-	}
-	out := simpleResponsesRequest{Model: model, MaxOutputTokens: req.MaxTokens, Temperature: req.Temperature, TopP: req.TopP, Stream: req.Stream}
-	for _, m := range req.Messages {
-		switch m.Role {
-		case "system", "developer":
-			if s := contentString(m.Content); s != "" {
-				if out.Instructions == "" {
-					out.Instructions = s
-				} else {
-					out.Instructions += "\n" + s
-				}
-			}
-		case "tool":
-			out.Input = append(out.Input, map[string]any{"type": "function_call_output", "call_id": m.ToolCallID, "output": contentString(m.Content)})
-		case "assistant":
-			if s := contentString(m.Content); s != "" {
-				out.Input = append(out.Input, textMessageItem("assistant", s))
-			}
-			for _, tc := range m.ToolCalls {
-				out.Input = append(out.Input, map[string]any{"type": "function_call", "call_id": tc.ID, "name": tc.Function.Name, "arguments": tc.Function.Arguments})
-			}
-		default:
-			out.Input = append(out.Input, textMessageItem("user", contentString(m.Content)))
-		}
-	}
-	for _, t := range req.Tools {
-		out.Tools = append(out.Tools, map[string]any{"type": "function", "name": t.Function.Name, "description": t.Function.Description, "parameters": t.Function.Parameters})
-	}
-	if len(out.Input) == 0 {
-		out.Input = []map[string]any{textMessageItem("user", "")}
-	}
-	return marshal(out)
+func textMessageItem(role, text string) map[string]any {
+	return messageItem(role, text, nil)
 }
 
-func textMessageItem(role, text string) map[string]any {
+// messageItem 生成 Responses 的 message 条目，文本与图片按顺序进 content 块数组。
+func messageItem(role, text string, images []irImage) map[string]any {
 	return map[string]any{
 		"type":    "message",
 		"role":    role,
-		"content": []map[string]any{{"type": "input_text", "text": text}},
+		"content": responsesContentParts(text, images),
 	}
 }
 
@@ -846,83 +746,8 @@ type chatResponse struct {
 	} `json:"usage"`
 }
 
-func responsesStatus(finish string) string {
-	switch finish {
-	case "length":
-		return "incomplete"
-	default:
-		return "completed"
-	}
-}
-
 func usageObject(in, out int) map[string]any {
 	return map[string]any{"input_tokens": in, "output_tokens": out, "total_tokens": in + out}
-}
-
-// ChatToResponsesResponse 把 Chat 非流式响应转换为 Responses 响应。
-func ChatToResponsesResponse(body []byte) ([]byte, error) {
-	return ChatToResponsesResponseWith(body, ResponseConvertOptions{})
-}
-
-// ChatToResponsesResponseWith 支持把自定义（自由文本）工具调用还原为 custom_tool_call，
-// 并把上游的思考内容回调给调用方（用于后续请求回填）。
-func ChatToResponsesResponseWith(body []byte, opts ResponseConvertOptions) ([]byte, error) {
-	var in chatResponse
-	if err := json.Unmarshal(body, &in); err != nil {
-		return nil, fmt.Errorf("解析 Chat 响应失败: %w", err)
-	}
-	out := map[string]any{
-		"id":         ensurePrefix(in.ID, "resp_"),
-		"object":     "response",
-		"created_at": time.Now().Unix(),
-		"status":     "completed",
-		"model":      in.Model,
-	}
-	var output []any
-	input, outputTokens := 0, 0
-	if in.Usage != nil {
-		input, outputTokens = in.Usage.PromptTokens, in.Usage.CompletionTokens
-	}
-	if len(in.Choices) > 0 {
-		ch := in.Choices[0]
-		out["status"] = responsesStatus(ch.FinishReason)
-		if text := contentString(ch.Message.Content); text != "" {
-			output = append(output, map[string]any{
-				"type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
-				"content": []map[string]any{{"type": "output_text", "text": text, "annotations": []any{}}},
-			})
-		}
-		var callIDs []string
-		for i, tc := range ch.Message.ToolCalls {
-			callIDs = append(callIDs, tc.ID)
-			if opts.CustomTools[tc.Function.Name] {
-				output = append(output, map[string]any{
-					"type": "custom_tool_call", "id": fmt.Sprintf("ctc_%d", i+1), "status": "completed",
-					"call_id": tc.ID, "name": tc.Function.Name, "input": freeformInput(tc.Function.Arguments),
-				})
-				continue
-			}
-			output = append(output, map[string]any{
-				"type": "function_call", "id": fmt.Sprintf("fc_%d", i+1), "status": "completed",
-				"call_id": tc.ID, "name": tc.Function.Name, "arguments": tc.Function.Arguments,
-			})
-		}
-		if opts.OnReasoning != nil {
-			reasoningText := ch.Message.Reasoning
-			if ch.Message.ReasoningContent != nil {
-				reasoningText = *ch.Message.ReasoningContent
-			}
-			if reasoningText != "" {
-				opts.OnReasoning(reasoningText, callIDs)
-			}
-		}
-	}
-	if output == nil {
-		output = []any{}
-	}
-	out["output"] = output
-	out["usage"] = usageObject(input, outputTokens)
-	return marshal(out)
 }
 
 type messagesResponse struct {
@@ -986,72 +811,6 @@ func MessagesToResponsesResponse(body []byte) ([]byte, error) {
 	}
 	out["output"] = output
 	out["usage"] = usageObject(inputTok, outputTok)
-	return marshal(out)
-}
-
-// ResponsesToChatResponse 把 Responses 非流式响应转换为 Chat 响应。
-func ResponsesToChatResponse(body []byte) ([]byte, error) {
-	var in struct {
-		ID     string `json:"id"`
-		Model  string `json:"model"`
-		Status string `json:"status"`
-		Output []struct {
-			Type      string `json:"type"`
-			Role      string `json:"role"`
-			CallID    string `json:"call_id"`
-			Name      string `json:"name"`
-			Arguments string `json:"arguments"`
-			Content   []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
-		Usage *struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-			TotalTokens  int `json:"total_tokens"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal(body, &in); err != nil {
-		return nil, fmt.Errorf("解析 Responses 响应失败: %w", err)
-	}
-	msg := chatMessage{Role: "assistant"}
-	for _, item := range in.Output {
-		switch item.Type {
-		case "message":
-			for _, c := range item.Content {
-				if c.Type == "output_text" || c.Type == "text" {
-					msg.Content = contentString(msg.Content) + c.Text
-				}
-			}
-		case "function_call":
-			var tc chatToolCall
-			tc.ID = item.CallID
-			tc.Type = "function"
-			tc.Function.Name = item.Name
-			tc.Function.Arguments = item.Arguments
-			msg.ToolCalls = append(msg.ToolCalls, tc)
-		}
-	}
-	finish := "stop"
-	if len(msg.ToolCalls) > 0 {
-		finish = "tool_calls"
-	}
-	if in.Status == "incomplete" {
-		finish = "length"
-	}
-	usage := map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-	if in.Usage != nil {
-		usage = map[string]any{"prompt_tokens": in.Usage.InputTokens, "completion_tokens": in.Usage.OutputTokens, "total_tokens": in.Usage.TotalTokens}
-	}
-	out := map[string]any{
-		"id":      ensurePrefix(in.ID, "chatcmpl_"),
-		"object":  "chat.completion",
-		"created": time.Now().Unix(),
-		"model":   in.Model,
-		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": finish}},
-		"usage":   usage,
-	}
 	return marshal(out)
 }
 

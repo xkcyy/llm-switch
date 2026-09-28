@@ -95,7 +95,10 @@ func TestProxyForwardsSessionAndUserAgent(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	ts := newTestProxy(t, upstream.URL)
+	// 会话标识头是 OpenCode Go 的供应商要求，由兼容扩展写入（见 internal/proxy/protocol/compat）
+	ts := newTestProxyWith(t, upstream.URL, func(c *config.Config) {
+		c.Providers[0].Extensions = []string{"opencode-go"}
+	})
 	body := `{"model":"deepseek/deepseek-chat","input":"hello world","stream":false}`
 
 	// 客户端带会话头：必须原样透传
@@ -176,6 +179,57 @@ func TestProxyResponsesToChatNonStream(t *testing.T) {
 	}
 	if out.Object != "response" || len(out.Output) == 0 || out.Output[0].Content[0].Text != "pong" {
 		t.Fatalf("响应转换错误: %+v", out)
+	}
+}
+
+// 图片输入端到端：Responses 入口的 input_image 必须出现在转换后的 Chat 上游请求里。
+func TestProxyResponsesToChatKeepsImages(t *testing.T) {
+	const imageURI = "data:image/png;base64,iVBORw0KGgo="
+	var lastBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		lastBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","model":"deepseek-chat","choices":[{"message":{"role":"assistant","content":"看到了"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	ts := newTestProxy(t, upstream.URL)
+	reqBody := `{"model":"deepseek/deepseek-chat","input":[{"type":"message","role":"user","content":[
+		{"type":"input_text","text":"看这张图"},
+		{"type":"input_image","image_url":"` + imageURI + `","detail":"high"}
+	]}]}`
+	resp, err := http.Post(ts.URL+"/v1/responses", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if !strings.Contains(lastBody, imageURI) {
+		t.Fatalf("上游请求丢失图片: %s", lastBody)
+	}
+	var sent struct {
+		Messages []struct {
+			Content []struct {
+				Type     string `json:"type"`
+				ImageURL struct {
+					URL    string `json:"url"`
+					Detail string `json:"detail"`
+				} `json:"image_url"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(lastBody), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent.Messages) != 1 || len(sent.Messages[0].Content) != 2 {
+		t.Fatalf("上游消息结构不对: %s", lastBody)
+	}
+	img := sent.Messages[0].Content[1]
+	if img.Type != "image_url" || img.ImageURL.URL != imageURI || img.ImageURL.Detail != "high" {
+		t.Fatalf("上游图片块不对: %s", lastBody)
 	}
 }
 
@@ -362,7 +416,9 @@ func TestProxyReasoningEcho(t *testing.T) {
 	defer upstream.Close()
 
 	ts := newTestProxyWith(t, upstream.URL, func(c *config.Config) {
-		c.Providers[0].Preset = "custom" // 冷缓存时不做兜底，先验证缓存回填
+		// 显式挂载思考内容回填扩展：这里验证的是缓存命中拿真实值，不做占位兜底
+		c.Providers[0].Preset = "custom"
+		c.Providers[0].Extensions = []string{"reasoning-echo"}
 	})
 
 	// 第一轮：入口 Responses，上游返回带 reasoning_content 的工具调用
@@ -508,5 +564,136 @@ func TestProxyLogsUpstreamErrorDetail(t *testing.T) {
 	}
 	if rec.Session == "" {
 		t.Fatalf("记录缺少会话标识: %+v", rec)
+	}
+}
+
+// 自动匹配判不出来的供应商（自建 DeepSeek 兼容网关）可以显式挂载兼容扩展。
+func TestProxyExplicitReasoningExtension(t *testing.T) {
+	var lastBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		lastBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	ts := newTestProxyWith(t, upstream.URL, func(c *config.Config) {
+		c.Providers[0].Preset = "custom"
+		c.Providers[0].Extensions = []string{"reasoning-echo"}
+	})
+	body := `{"model":"deepseek/deepseek-chat","stream":false,"input":[
+		{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"call_x"},
+		{"type":"function_call_output","call_id":"call_x","output":"done"}
+	]}`
+	resp, err := http.Post(ts.URL+"/v1/responses", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	var sent struct {
+		Messages []struct {
+			Role             string `json:"role"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(lastBody), &sent); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range sent.Messages {
+		if m.Role != "assistant" {
+			continue
+		}
+		found = true
+		if strings.TrimSpace(m.ReasoningContent) == "" {
+			t.Fatalf("显式挂载 reasoning-echo 后必须回填非空占位: %s", lastBody)
+		}
+	}
+	if !found {
+		t.Fatalf("未找到 assistant 消息: %s", lastBody)
+	}
+}
+
+// 未知扩展名不生效，但要在代理记录里如实提示。
+func TestProxyUnknownExtensionWarns(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	ts, srv := newTestProxyServer(t, upstream.URL, func(c *config.Config) {
+		c.Providers[0].Preset = "custom"
+		c.Providers[0].Extensions = []string{"no-such-extension"}
+	})
+	resp, err := http.Post(ts.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"deepseek/deepseek-chat","stream":false,"input":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	rec := lastRecord(t, srv)
+	for _, w := range rec.Warnings {
+		if strings.Contains(w, "no-such-extension") {
+			return
+		}
+	}
+	t.Fatalf("未知扩展名应在记录里提示: %+v", rec.Warnings)
+}
+
+// 标准路径：客户端回传 reasoning 条目时，补进上游 Chat 体的必须是真实思考内容，
+// 而不是占位文本（opencode zen 在会话状态缺失时会校验该字段）。
+func TestProxyEchoesClientReasoning(t *testing.T) {
+	var lastBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		lastBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	ts := newTestProxyWith(t, upstream.URL, func(c *config.Config) {
+		c.Providers[0].Preset = "deepseek" // 自动命中 reasoning-echo
+	})
+	body := `{"model":"deepseek/deepseek-chat","stream":false,"input":[
+		{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"上一轮真实推理"}]},
+		{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"call_e"},
+		{"type":"function_call_output","call_id":"call_e","output":"done"}
+	]}`
+	resp, err := http.Post(ts.URL+"/v1/responses", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	var sent struct {
+		Messages []struct {
+			Role             string `json:"role"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(lastBody), &sent); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range sent.Messages {
+		if m.Role != "assistant" {
+			continue
+		}
+		found = true
+		if m.ReasoningContent != "上一轮真实推理" {
+			t.Fatalf("应回填客户端回传的真实思考内容，实际 %q", m.ReasoningContent)
+		}
+	}
+	if !found {
+		t.Fatalf("未找到 assistant 消息: %s", lastBody)
+	}
+	if strings.Contains(lastBody, "(reasoning omitted)") {
+		t.Fatalf("有真实内容时不应使用占位文本: %s", lastBody)
 	}
 }

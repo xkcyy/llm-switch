@@ -77,6 +77,17 @@ type Service struct {
 	job *Job
 }
 
+// driverAPI 是接入编排对界面驱动的依赖（seam）。
+// 生产实现是 CDP 驱动 *Driver；测试用内存实现，让编排逻辑
+// （先删后加、逆序补齐、复核结论）不必连真机就能验证。
+type driverAPI interface {
+	Close()
+	EnsureModelsPage(ctx context.Context) error
+	ReadCustomModels(ctx context.Context) ([]string, error)
+	AddModel(ctx context.Context, spec ModelSpec, baseURL, apiKey string, timeout time.Duration) (AddResult, error)
+	DeleteModel(ctx context.Context, display string) error
+}
+
 func NewService(store *config.Store) *Service {
 	return &Service{store: store, paths: DefaultPaths()}
 }
@@ -94,15 +105,8 @@ func (s *Service) BaseURL() string {
 func (s *Service) Models() []string {
 	cfg := s.store.Snapshot()
 	out := []string{}
-	for _, m := range cfg.Models {
-		if !m.Enabled {
-			continue
-		}
-		p, ok := cfg.FindProvider(m.ProviderID)
-		if !ok || !p.Enabled {
-			continue
-		}
-		out = append(out, p.ID+"/"+m.ID)
+	for _, a := range cfg.AvailableModels() {
+		out = append(out, a.Slug)
 	}
 	return out
 }
@@ -318,29 +322,24 @@ func orderMatches(targets, existing []string) bool {
 func (s *Service) SpecFor(id string) ModelSpec {
 	spec := ModelSpec{ID: id}
 	cfg := s.store.Snapshot()
-	for _, m := range cfg.Models {
-		if !m.Enabled {
-			continue
-		}
-		p, ok := cfg.FindProvider(m.ProviderID)
-		if !ok || !p.Enabled || p.ID+"/"+m.ID != id {
-			continue
-		}
-		if m.ContextWindow != nil && *m.ContextWindow > 0 {
-			spec.Context = *m.ContextWindow
-		}
-		if m.MaxOutputTokens != nil && *m.MaxOutputTokens > 0 {
-			spec.MaxOutput = *m.MaxOutputTokens
-		}
-		if m.Reasoning != nil && len(m.Reasoning.Levels) > 0 {
-			yes := true
-			spec.Thinking = &yes
-		}
-		if hasVisionCapability(m.Capabilities) {
-			yes := true
-			spec.Vision = &yes
-		}
-		break
+	a, ok := cfg.LookupAvailable(id)
+	if !ok {
+		return spec
+	}
+	m := a.Model
+	if m.ContextWindow != nil && *m.ContextWindow > 0 {
+		spec.Context = *m.ContextWindow
+	}
+	if m.MaxOutputTokens != nil && *m.MaxOutputTokens > 0 {
+		spec.MaxOutput = *m.MaxOutputTokens
+	}
+	if m.Reasoning != nil && len(m.Reasoning.Levels) > 0 {
+		yes := true
+		spec.Thinking = &yes
+	}
+	if hasVisionCapability(m.Capabilities) {
+		yes := true
+		spec.Vision = &yes
 	}
 	return spec
 }
@@ -360,7 +359,7 @@ func hasVisionCapability(caps []string) bool {
 // applyAdds 逐个添加模型；返回 added/saved/failed 数量。
 // 注意按传入顺序依次添加 —— Trae 的列表是「新加的排最前面」，
 // 所以调用方会传入逆序，让最终展示顺序与配置顺序一致。
-func (s *Service) applyAdds(ctx context.Context, drv *Driver, models []string, base int) (added, saved, failed int) {
+func (s *Service) applyAdds(ctx context.Context, drv driverAPI, models []string, base int) (added, saved, failed int) {
 	for i, model := range models {
 		s.setJob(func(j *Job) { j.Current = model; j.Done = base + i })
 		res, err := drv.AddModel(ctx, s.SpecFor(model), s.BaseURL(), PlaceholderKey, addTimeout)
@@ -386,7 +385,7 @@ func (s *Service) applyAdds(ctx context.Context, drv *Driver, models []string, b
 }
 
 // applyDeletes 逐个删除不想要的模型；返回 deleted/failed 数量。
-func (s *Service) applyDeletes(ctx context.Context, drv *Driver, models []string, base int) (deleted, failed int) {
+func (s *Service) applyDeletes(ctx context.Context, drv driverAPI, models []string, base int) (deleted, failed int) {
 	for i, model := range models {
 		s.setJob(func(j *Job) { j.Current = model; j.Done = base + i })
 		item := ItemResult{Model: model, Result: "deleted"}
@@ -404,7 +403,7 @@ func (s *Service) applyDeletes(ctx context.Context, drv *Driver, models []string
 }
 
 // syncModels 让 Trae 与代理对齐：补齐缺失、删除多余，并复核结果。
-func (s *Service) syncModels(ctx context.Context, drv *Driver, targets, existing []string, done, fail func(string)) {
+func (s *Service) syncModels(ctx context.Context, drv driverAPI, targets, existing []string, done, fail func(string)) {
 	missing, extra := SplitDiff(targets, existing)
 	inConfig := map[string]bool{}
 	for _, t := range targets {
@@ -449,7 +448,7 @@ func (s *Service) syncModels(ctx context.Context, drv *Driver, targets, existing
 }
 
 // reconcileMessage 复核界面状态并给出一句如实的结论。
-func (s *Service) reconcileMessage(ctx context.Context, drv *Driver, targets []string, deleted, delFailed, added, addFailed int) string {
+func (s *Service) reconcileMessage(ctx context.Context, drv driverAPI, targets []string, deleted, delFailed, added, addFailed int) string {
 	after, err := drv.ReadCustomModels(ctx)
 	if err != nil {
 		return fmt.Sprintf("已处理：新增 %d、删除 %d，但复核失败（%v）", added, deleted, err)
@@ -480,7 +479,7 @@ func (s *Service) reconcileMessage(ctx context.Context, drv *Driver, targets []s
 
 // reorderModels 重建顺序：删掉所有代理模型后按逆序重新添加，
 // 使 Trae 列表中的展示顺序与配置顺序（同供应商相邻）一致。
-func (s *Service) reorderModels(ctx context.Context, drv *Driver, targets, existing []string, done, fail func(string)) {
+func (s *Service) reorderModels(ctx context.Context, drv driverAPI, targets, existing []string, done, fail func(string)) {
 	if len(targets) == 0 {
 		fail("本地代理没有可用模型，无法排序")
 		return

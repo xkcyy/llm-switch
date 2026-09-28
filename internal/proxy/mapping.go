@@ -27,25 +27,7 @@ type Match struct {
 // 优先与入口协议一致（直通，保真度最高），否则按供应商配置顺序选择第一个可转换的协议。
 // 模型级 protocol 固定时只使用该协议（多端点网关的个别模型可能需要固定）。
 func (m Match) UpstreamProtocol(entry protocol.Protocol) (protocol.Protocol, error) {
-	candidates := m.Provider.UpstreamProtocols()
-	if pin := strings.TrimSpace(m.Model.Protocol); pin != "" {
-		candidates = []string{pin}
-	}
-	for _, c := range candidates {
-		if p, err := protocol.Parse(c); err == nil && p == entry {
-			return p, nil
-		}
-	}
-	for _, c := range candidates {
-		p, err := protocol.Parse(c)
-		if err != nil {
-			continue
-		}
-		if protocol.CanConvert(entry, p) {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("协议不兼容：入口 %s，上游可用协议 %s", entry, strings.Join(candidates, "、"))
+	return protocol.Select(entry, m.Provider.UpstreamProtocols(), m.Model.Protocol)
 }
 
 // Index 是根据配置构建的只读映射索引（仅包含已启用的供应商与模型）。
@@ -84,16 +66,9 @@ func BuildIndex(cfg *config.Config) *Index {
 		}
 		ix.models[p.ID] = map[string]config.Model{}
 	}
-	for _, m := range cfg.Models {
-		if !m.Enabled {
-			continue
-		}
-		p, ok := ix.byID[m.ProviderID]
-		if !ok {
-			continue
-		}
-		ix.models[p.ID][m.ID] = m
-		ix.plain[m.ID] = append(ix.plain[m.ID], Match{Provider: p, Model: m})
+	for _, a := range cfg.AvailableModels() {
+		ix.models[a.Provider.ID][a.Model.ID] = a.Model
+		ix.plain[a.Model.ID] = append(ix.plain[a.Model.ID], Match{Provider: a.Provider, Model: a.Model})
 	}
 	return ix
 }

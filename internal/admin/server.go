@@ -161,7 +161,6 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/providers/{providerID}/models/{modelID}", s.handleModelUpdate)
 	mux.HandleFunc("DELETE /api/providers/{providerID}/models/{modelID}", s.handleModelDelete)
 	mux.HandleFunc("POST /api/providers/{providerID}/models/{modelID}/test", s.handleModelTest)
-	mux.HandleFunc("GET /api/models/available", s.handleAvailableModels)
 
 	mux.HandleFunc("GET /api/proxy/status", s.handleProxyStatus)
 	mux.HandleFunc("POST /api/proxy/start", s.handleProxyStart)
@@ -195,18 +194,12 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	cfg := s.store.Snapshot()
-	enabled := 0
-	for _, m := range cfg.Models {
-		if m.Enabled {
-			enabled++
-		}
-	}
 	writeJSON(w, 200, map[string]any{
 		"proxy": map[string]any{
 			"running": s.proxy.Running(), "host": cfg.Settings.Proxy.Host,
 			"port": cfg.Settings.Proxy.Port, "protocols": []string{"chat", "responses", "messages"},
 		},
-		"counts": map[string]any{"providers": len(cfg.Providers), "models": len(cfg.Models), "enabled_models": enabled},
+		"counts": map[string]any{"providers": len(cfg.Providers), "models": len(cfg.Models), "enabled_models": len(cfg.AvailableModels())},
 		"codex": map[string]any{
 			"connected": s.codex.Connected(), "auto_sync": cfg.Settings.CodexAutoSync,
 			"config_path": s.codex.Paths().ConfigTOML,
@@ -237,6 +230,7 @@ type providerDTO struct {
 	BaseURL    string   `json:"base_url"`
 	Protocol   string   `json:"protocol"`
 	Protocols  []string `json:"protocols"`
+	Extensions []string `json:"extensions"`
 	Auth       authDTO  `json:"auth"`
 	Enabled    bool     `json:"enabled"`
 	ModelCount int      `json:"model_count"`
@@ -259,8 +253,9 @@ func (s *Server) toProviderDTO(p config.Provider, modelCount int) providerDTO {
 	return providerDTO{
 		ID: p.ID, Name: p.Name, Preset: p.Preset, BaseURL: p.BaseURL,
 		Protocol: p.Protocol, Protocols: p.UpstreamProtocols(),
-		Auth:    authDTO{Type: p.Auth.Type, APIKeyMasked: maskKey(p.Auth.APIKey), Header: p.Auth.Header},
-		Enabled: p.Enabled, ModelCount: modelCount,
+		Extensions: p.Extensions,
+		Auth:       authDTO{Type: p.Auth.Type, APIKeyMasked: maskKey(p.Auth.APIKey), Header: p.Auth.Header},
+		Enabled:    p.Enabled, ModelCount: modelCount,
 	}
 }
 
@@ -280,88 +275,29 @@ type providerInput struct {
 	BaseURL   string   `json:"base_url"`
 	Protocol  string   `json:"protocol"`  // 兼容旧字段（单值）
 	Protocols []string `json:"protocols"` // 多协议，按优先级排列
-	Auth      authDTO  `json:"auth"`
-	APIKey    string   `json:"api_key"`
-	Header    string   `json:"header"`
-	Enabled   *bool    `json:"enabled"`
+	// Extensions 是显式挂载的兼容扩展名；缺省（nil）表示保留原值，不覆盖。
+	Extensions []string `json:"extensions"`
+	Auth       authDTO  `json:"auth"`
+	APIKey     string   `json:"api_key"`
+	Header     string   `json:"header"`
+	Enabled    *bool    `json:"enabled"`
 }
 
-func containsString(list []string, v string) bool {
-	for _, s := range list {
-		if s == v {
-			return true
-		}
+// draft 把 HTTP 输入转成 config 的写入输入。
+// JSON 字段名与兼容字段（单值 protocol、顶层 header）留在这一层；
+// 写入规则（归一化、唯一性、级联）在 config 里。
+func (in providerInput) draft() config.ProviderDraft {
+	d := config.ProviderDraft{
+		ID: in.ID, Name: in.Name, Preset: in.Preset, BaseURL: in.BaseURL,
+		Protocol: in.Protocol, Protocols: in.Protocols,
+		Auth:    config.AuthDraft{Type: in.Auth.Type, APIKey: in.APIKey, Header: in.Header},
+		Enabled: in.Enabled,
 	}
-	return false
-}
-
-// normalizedProtocols 归一化协议列表：兼容旧的单值 protocol 字段，去重并校验。
-func (in *providerInput) normalizedProtocols() ([]string, error) {
-	raw := in.Protocols
-	if len(raw) == 0 && strings.TrimSpace(in.Protocol) != "" {
-		raw = []string{in.Protocol}
+	if in.Extensions != nil {
+		exts := in.Extensions
+		d.Extensions = &exts
 	}
-	out := []string{}
-	for _, r := range raw {
-		proto := strings.ToLower(strings.TrimSpace(r))
-		if proto == "" {
-			continue
-		}
-		if !config.ValidProtocol(proto) {
-			return nil, fmt.Errorf("协议 %q 无效，必须是 chat、responses 或 messages", r)
-		}
-		if !containsString(out, proto) {
-			out = append(out, proto)
-		}
-	}
-	if len(out) == 0 {
-		return nil, errors.New("请至少选择一个协议")
-	}
-	return out, nil
-}
-
-func normalizeProviderID(id string) string {
-	id = strings.TrimSpace(id)
-	id = strings.ReplaceAll(id, " ", "-")
-	id = strings.ReplaceAll(id, "/", "")
-	return strings.ToLower(id)
-}
-
-// deriveProviderID 在未填写时由名称推导一个可用的供应商 ID。
-func deriveProviderID(name string) string {
-	if id := config.DeriveProviderID(name); id != "" {
-		return id
-	}
-	return randomID("prv_")
-}
-
-func (in *providerInput) validate() error {
-	if strings.TrimSpace(in.Name) == "" {
-		return errors.New("供应商名称不能为空")
-	}
-	if strings.TrimSpace(in.BaseURL) == "" || !strings.HasPrefix(in.BaseURL, "http") {
-		return errors.New("接口地址必须以 http(s):// 开头")
-	}
-	if _, err := in.normalizedProtocols(); err != nil {
-		return err
-	}
-	switch in.Auth.Type {
-	case "", "bearer", "api_key_header", "custom":
-	default:
-		return errors.New("认证类型不支持")
-	}
-	return nil
-}
-
-func normAuth(in *providerInput) config.Auth {
-	a := config.Auth{Type: in.Auth.Type, APIKey: in.APIKey, Header: in.Header}
-	if a.Type == "" {
-		a.Type = "bearer"
-	}
-	if a.Header == "" && (a.Type == "api_key_header" || a.Type == "custom") {
-		a.Header = "x-api-key"
-	}
-	return a
+	return d
 }
 
 func (s *Server) handleProviderCreate(w http.ResponseWriter, r *http.Request) {
@@ -370,39 +306,11 @@ func (s *Server) handleProviderCreate(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, err.Error())
 		return
 	}
-	if err := in.validate(); err != nil {
-		apiErr(w, 400, err.Error())
-		return
-	}
-	enabled := true
-	if in.Enabled != nil {
-		enabled = *in.Enabled
-	}
-	protocols, err := in.normalizedProtocols()
-	if err != nil {
-		apiErr(w, 400, err.Error())
-		return
-	}
 	var created config.Provider
-	err = s.store.Update(func(c *config.Config) error {
-		if _, ok := c.FindProviderByName(in.Name); ok {
-			return fmt.Errorf("供应商名称 %q 已存在", in.Name)
-		}
-		id := normalizeProviderID(in.ID)
-		if id == "" {
-			id = deriveProviderID(in.Name)
-		}
-		for _, p := range c.Providers {
-			if strings.EqualFold(p.ID, id) {
-				return fmt.Errorf("供应商 ID %q 已存在，请换一个", id)
-			}
-		}
-		created = config.Provider{
-			ID: id, Name: in.Name, Preset: in.Preset, BaseURL: strings.TrimRight(in.BaseURL, "/"),
-			Protocol: protocols[0], Protocols: protocols, Auth: normAuth(&in), Enabled: enabled,
-		}
-		c.Providers = append(c.Providers, created)
-		return nil
+	err := s.store.Update(func(c *config.Config) error {
+		p, err := c.AddProvider(in.draft())
+		created = p
+		return err
 	})
 	if err != nil {
 		apiErr(w, 400, err.Error())
@@ -418,66 +326,11 @@ func (s *Server) handleProviderUpdate(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, err.Error())
 		return
 	}
-	if err := in.validate(); err != nil {
-		apiErr(w, 400, err.Error())
-		return
-	}
-	protocols, err := in.normalizedProtocols()
-	if err != nil {
-		apiErr(w, 400, err.Error())
-		return
-	}
 	var updated config.Provider
-	err = s.store.Update(func(c *config.Config) error {
-		for i := range c.Providers {
-			if c.Providers[i].ID != id {
-				continue
-			}
-			for _, other := range c.Providers {
-				if other.ID != id && other.Name == in.Name {
-					return fmt.Errorf("供应商名称 %q 已存在", in.Name)
-				}
-			}
-			p := &c.Providers[i]
-			oldID := p.ID
-			newID := normalizeProviderID(in.ID)
-			if newID == "" {
-				newID = oldID
-			}
-			if !strings.EqualFold(newID, oldID) {
-				for _, other := range c.Providers {
-					if strings.EqualFold(other.ID, newID) {
-						return fmt.Errorf("供应商 ID %q 已存在，请换一个", newID)
-					}
-				}
-			}
-			p.ID = newID
-			p.Name, p.Preset = in.Name, in.Preset
-			p.Protocols, p.Protocol = protocols, protocols[0]
-			p.BaseURL = strings.TrimRight(in.BaseURL, "/")
-			auth := normAuth(&in)
-			if auth.APIKey == "" {
-				auth.APIKey = p.Auth.APIKey // 留空表示保留原 Key
-			}
-			p.Auth = auth
-			if in.Enabled != nil {
-				p.Enabled = *in.Enabled
-			}
-			if newID != oldID {
-				// 供应商 ID 变更：级联更新模型归属与默认模型
-				for j := range c.Models {
-					if c.Models[j].ProviderID == oldID {
-						c.Models[j].ProviderID = newID
-					}
-				}
-				if strings.HasPrefix(c.Settings.DefaultModel, oldID+"/") {
-					c.Settings.DefaultModel = newID + "/" + strings.TrimPrefix(c.Settings.DefaultModel, oldID+"/")
-				}
-			}
-			updated = *p
-			return nil
-		}
-		return errors.New("供应商不存在")
+	err := s.store.Update(func(c *config.Config) error {
+		p, err := c.UpdateProvider(id, in.draft())
+		updated = p
+		return err
 	})
 	if err != nil {
 		apiErr(w, 400, err.Error())
@@ -491,27 +344,9 @@ func (s *Server) handleProviderDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	removed := 0
 	err := s.store.Update(func(c *config.Config) error {
-		idx := -1
-		for i := range c.Providers {
-			if c.Providers[i].ID == id {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			return errors.New("供应商不存在")
-		}
-		c.Providers = append(c.Providers[:idx], c.Providers[idx+1:]...)
-		models := c.Models[:0]
-		for _, m := range c.Models {
-			if m.ProviderID == id {
-				removed++
-				continue
-			}
-			models = append(models, m)
-		}
-		c.Models = models
-		return nil
+		n, err := c.RemoveProvider(id)
+		removed = n
+		return err
 	})
 	if err != nil {
 		apiErr(w, 400, err.Error())
@@ -580,7 +415,7 @@ func (s *Server) toModelDTO(cfg *config.Config, m config.Model) modelDTO {
 		providerID = p.ID
 	}
 	return modelDTO{
-		ID: m.ID, ProviderID: providerID, ProviderName: name, Slug: providerID + "/" + m.ID,
+		ID: m.ID, ProviderID: providerID, ProviderName: name, Slug: config.ModelSlug(providerID, m.ID),
 		Name: m.Name, Description: m.Description, Capabilities: m.Capabilities,
 		Protocol: m.Protocol, ContextWindow: m.ContextWindow, MaxOutputTokens: m.MaxOutputTokens,
 		Reasoning: m.Reasoning, Enabled: m.Enabled,
@@ -609,28 +444,14 @@ type modelInput struct {
 	Enabled         *bool             `json:"enabled"`
 }
 
-func (in *modelInput) validate() error {
-	if strings.TrimSpace(in.ID) == "" {
-		return errors.New("模型 ID 不能为空")
+// draft 把 HTTP 输入转成 config 的写入输入。
+func (in modelInput) draft() config.ModelDraft {
+	return config.ModelDraft{
+		ID: in.ID, Name: in.Name, Description: in.Description,
+		Capabilities: in.Capabilities, Protocol: in.Protocol,
+		ContextWindow: in.ContextWindow, MaxOutputTokens: in.MaxOutputTokens,
+		Reasoning: in.Reasoning, Enabled: in.Enabled,
 	}
-	// 上游模型 ID 允许包含 /（例如 Qwen/Qwen3.6-35B-A3B），对外请求名会自动拼接供应商 ID 前缀
-	switch in.Protocol {
-	case "", "chat", "responses", "messages":
-	default:
-		return errors.New("模型协议必须是 chat、responses、messages 或留空（跟随供应商）")
-	}
-	if in.Reasoning != nil && in.Reasoning.DefaultLevel != "" && len(in.Reasoning.Levels) > 0 {
-		found := false
-		for _, l := range in.Reasoning.Levels {
-			if strings.EqualFold(l, in.Reasoning.DefaultLevel) {
-				found = true
-			}
-		}
-		if !found {
-			return errors.New("默认推理档位不在支持列表中")
-		}
-	}
-	return nil
 }
 
 func (s *Server) handleModelCreate(w http.ResponseWriter, r *http.Request) {
@@ -640,39 +461,11 @@ func (s *Server) handleModelCreate(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, err.Error())
 		return
 	}
-	if err := in.validate(); err != nil {
-		apiErr(w, 400, err.Error())
-		return
-	}
-	enabled := true
-	if in.Enabled != nil {
-		enabled = *in.Enabled
-	}
 	var created config.Model
 	err := s.store.Update(func(c *config.Config) error {
-		p, ok := c.FindProvider(pid)
-		if !ok {
-			return errors.New("供应商不存在")
-		}
-		if _, ok := c.FindModel(pid, in.ID); ok {
-			return fmt.Errorf("模型 %q 已存在", in.ID)
-		}
-		name := in.Name
-		if name == "" {
-			name = in.ID
-		}
-		created = config.Model{
-			ID: in.ID, ProviderID: pid, Name: name, Description: in.Description,
-			Capabilities: in.Capabilities, Protocol: in.Protocol, ContextWindow: in.ContextWindow,
-			MaxOutputTokens: in.MaxOutputTokens,
-			Reasoning:       in.Reasoning, Enabled: enabled,
-		}
-		c.Models = append(c.Models, created)
-		// 首次添加模型时自动设为默认模型，用户无需任何操作
-		if c.Settings.DefaultModel == "" {
-			c.Settings.DefaultModel = p.ID + "/" + in.ID
-		}
-		return nil
+		m, err := c.AddModel(pid, in.draft())
+		created = m
+		return err
 	})
 	if err != nil {
 		apiErr(w, 400, err.Error())
@@ -689,37 +482,11 @@ func (s *Server) handleModelUpdate(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 400, err.Error())
 		return
 	}
-	if err := in.validate(); err != nil {
-		apiErr(w, 400, err.Error())
-		return
-	}
 	var updated config.Model
 	err := s.store.Update(func(c *config.Config) error {
-		for i := range c.Models {
-			m := &c.Models[i]
-			if m.ProviderID != pid || m.ID != mid {
-				continue
-			}
-			if in.ID != mid {
-				if _, exists := c.FindModel(pid, in.ID); exists {
-					return fmt.Errorf("模型 %q 已存在", in.ID)
-				}
-				m.ID = in.ID
-			}
-			m.Name, m.Description = in.Name, in.Description
-			m.Capabilities, m.Protocol = in.Capabilities, in.Protocol
-			m.ContextWindow = in.ContextWindow
-			m.MaxOutputTokens, m.Reasoning = in.MaxOutputTokens, in.Reasoning
-			if in.Enabled != nil {
-				m.Enabled = *in.Enabled
-			}
-			if m.Name == "" {
-				m.Name = m.ID
-			}
-			updated = *m
-			return nil
-		}
-		return errors.New("模型不存在")
+		m, err := c.UpdateModel(pid, mid, in.draft())
+		updated = m
+		return err
 	})
 	if err != nil {
 		apiErr(w, 400, err.Error())
@@ -732,18 +499,7 @@ func (s *Server) handleModelUpdate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleModelDelete(w http.ResponseWriter, r *http.Request) {
 	pid, mid := r.PathValue("providerID"), r.PathValue("modelID")
 	err := s.store.Update(func(c *config.Config) error {
-		idx := -1
-		for i := range c.Models {
-			if c.Models[i].ProviderID == pid && c.Models[i].ID == mid {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			return errors.New("模型不存在")
-		}
-		c.Models = append(c.Models[:idx], c.Models[idx+1:]...)
-		return nil
+		return c.RemoveModel(pid, mid)
 	})
 	if err != nil {
 		apiErr(w, 400, err.Error())
@@ -755,22 +511,6 @@ func (s *Server) handleModelDelete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleModelTest(w http.ResponseWriter, r *http.Request) {
 	res := s.providers.TestModel(r.Context(), r.PathValue("providerID"), r.PathValue("modelID"))
 	writeJSON(w, 200, res)
-}
-
-func (s *Server) handleAvailableModels(w http.ResponseWriter, r *http.Request) {
-	cfg := s.store.Snapshot()
-	out := []map[string]any{}
-	for _, m := range cfg.Models {
-		p, ok := cfg.FindProvider(m.ProviderID)
-		if !ok {
-			continue
-		}
-		out = append(out, map[string]any{
-			"slug": p.ID + "/" + m.ID, "provider_id": p.ID, "provider": p.Name, "id": m.ID,
-			"name": m.Name, "enabled": m.Enabled && p.Enabled, "context_window": m.ContextWindow,
-		})
-	}
-	writeJSON(w, 200, out)
 }
 
 // ---- 代理控制 ----
@@ -1120,10 +860,4 @@ func randomToken() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-func randomID(prefix string) string {
-	b := make([]byte, 4)
-	rand.Read(b)
-	return prefix + hex.EncodeToString(b)
 }

@@ -94,15 +94,8 @@ var reasoningDescriptions = map[string]string{
 func BuildCatalog(cfg *config.Config) (Catalog, error) {
 	cat := Catalog{Models: []CatalogModel{}}
 	priority := 1
-	for _, m := range cfg.Models {
-		if !m.Enabled {
-			continue
-		}
-		p, ok := cfg.FindProvider(m.ProviderID)
-		if !ok || !p.Enabled {
-			continue
-		}
-		slug := p.ID + "/" + m.ID
+	for _, a := range cfg.AvailableModels() {
+		m, slug := a.Model, a.Slug
 		// 展示名与请求名保持一致：Codex 模型列表里也显示 供应商ID/模型ID，
 		// 避免同名模型来自不同供应商时无法区分。
 		name := slug
@@ -126,8 +119,9 @@ func BuildCatalog(cfg *config.Config) (Catalog, error) {
 		}
 		mods := []string{"text"}
 		for _, c := range m.Capabilities {
-			if c == "vision" {
+			if isVisionCapability(c) {
 				mods = []string{"text", "image"}
+				break
 			}
 		}
 		if !contains(levels, defLevel) {
@@ -201,6 +195,16 @@ func contains(list []string, v string) bool {
 		if strings.EqualFold(item, v) {
 			return true
 		}
+	}
+	return false
+}
+
+// isVisionCapability 判断能力项是否表示图片输入。
+// 只有明确声明视觉能力才写 image：能力为空或只有 tools 时视为未知，保持纯文本。
+func isVisionCapability(c string) bool {
+	switch strings.ToLower(strings.TrimSpace(c)) {
+	case "vision", "image", "multimodal", "image_input":
+		return true
 	}
 	return false
 }

@@ -80,11 +80,11 @@ screenshots/          真实数据下的界面截图
 
 ## 已实现
 
-- **供应商与模型**：预置类型（KmAiModelHub、OpenCode Go、DeepSeek、OpenAI、Anthropic、自定义）默认地址与协议已对齐官方文档；供应商 ID 可在界面配置并作为请求名前缀（`供应商ID/模型ID`，兼容按名称匹配）；连接测试、模型调用测试、从上游拉取模型并一键导入；上下文窗口与推理档位自动补全（models.dev），不猜命名空间、失败降级。
+- **供应商与模型**：预置类型（KmAiModelHub、OpenCode Go、DeepSeek、OpenAI、Anthropic、自定义）默认地址与协议已对齐官方文档；供应商 ID 可在界面配置并作为请求名前缀（`供应商ID/模型ID`，兼容按名称匹配）；连接测试、模型调用测试、从上游拉取模型并一键导入；上下文窗口、推理档位与图片输入自动补全（上游 `input_modalities` 优先，其次 models.dev 的可信命名空间），不猜命名空间、失败降级。
 - **上游兼容**：自定义 `User-Agent`、会话头透传（`x-opencode-session`，兼容 Codex 的 `session_id`）与兜底稳定会话 ID；**供应商多协议（有序多选）+ 原生直通优先**——入口协议命中供应商声明的协议列表时直接直通，未命中才转换；模型可用 `protocol` 固定单协议（如 OpenCode Go 的多端点模型）。
 - **本机代理**：Chat / Responses / Messages 三类入口、需求 6.5 的确定性映射、上游认证注入、流式逐事件转发、错误体转换；记录区分直通/转换与转换告警。
-- **协议转换**：直通 + Responses↔Chat + Chat→Messages + Responses→Messages（含流式事件）；并行工具调用合并成组、工具结果配对与兜底、思考内容（`reasoning_content`）回填、自定义（自由文本）工具桥接。
-- **Codex 配置**：一键接入、自动同步（默认开启，模型增删/默认模型/端口变更触发）、写入前校验与原子替换、断开接入只移除自己写入的配置。
+- **协议转换**：直通 + Responses↔Chat + Chat→Messages + Responses→Messages（含流式事件）；并行工具调用合并成组、工具结果配对与兜底、思考内容（`reasoning_content`）回填、自定义（自由文本）工具桥接；图片输入在三种协议间转换（Responses `input_image` ↔ Chat `image_url` ↔ Messages base64/URL 图片块）。
+- **Codex 配置**：一键接入、自动同步（默认开启，模型增删/默认模型/端口变更触发）、写入前校验与原子替换、断开接入只移除自己写入的配置；模型的 `input_modalities` 按「图片输入」标记生成，Codex 可粘贴截图。
 - **OpenCode 配置**：只维护 `llm-switch` 一个 provider 段（`opencode.json`），模型键为 `供应商ID/模型ID`（保证代理侧确定性映射、同名模型不歧义）；**形状自适应**——自动跟随现有文件，或在界面强制 V1（OpenCode 1.x 兼容）/ V2（OpenCode 2.x 原生，额外写入 `modelID` 与 `limit.context`）；一键接入、自动同步（模型增删/端口变更触发，且只在已接入时维护，不会自行创建配置文件）、写入前校验与原子替换、断开接入只移除自己写入的配置；切换形状时自动清理另一种形状下的同名残留；支持 `opencode.jsonc` 场景的明确拒绝（不丢注释）与 `OPENCODE_CONFIG` / `XDG_CONFIG_HOME` 路径解析。
 - **Trae SOLO 接入**：页面「一键接入」把 Trae 的自定义模型与本地代理**完全对齐**——模型 ID 即 `供应商ID/模型ID`、请求地址指向本机代理，缺少的补齐、不一致的移除，并在添加时按模型元数据填好 Trae 的**高级配置**（上下文窗口、思考模式、图片输入），结尾复核并如实报告；另有可选的「重新排序」按供应商顺序重建列表（Trae 是「新加排最前」，重建后才能得到稳定顺序，代价是每个模型重跑一次连通性测试）。后端用 Go 内置 CDP 驱动 Trae 自己的设置界面完成注册（对应应用内协议 `chat/add_custom_model`，由服务端注册），**不改 Trae 的数据库与配置**；调试端口通过官方支持的 `argv.json` 写入，Trae 未运行则自动带参数拉起，在运行则引导重启。详见 [Trae-SOLO-接入分析与方案](docs/design/Trae-SOLO-接入分析与方案.md)。
 - **默认值**：首个模型自动成为默认模型；开机启动、启动打开面板、Codex/OpenCode 自动同步默认开启；模型元数据自动打「自动」标签。
@@ -93,6 +93,8 @@ screenshots/          真实数据下的界面截图
 ## 验证情况
 
 - `go test ./...`：映射规则、协议转换、代理端到端（httptest 模拟上游）、上游请求头（会话透传/UA）、模型级协议覆盖、Codex 配置合并与生成、OpenCode 配置合并/默认模型回退/断开接入/jsonc 拒绝、配置存储并发与失败回滚、配置自愈。
+- 图片输入：Responses→Chat、Responses→Messages、Chat→Responses、Chat→Messages 四种转换均保留图片（单元测试 + 代理端到端），Codex 目录的 `input_modalities` 仅在模型标记「图片输入」时写入 `image`。
+- 图片能力自动补全：在线元数据缓存读出 `input_modalities`、旧缓存版本触发刷新并落盘（单元测试）；真实拉取 models.dev 与 DeepSeek `/v1/models` 核对识别结果。
 - 真实 Codex（0.147）：生成的 config.toml / auth.json / 模型清单可被 `codex debug models` 正常解析，`display_name` 与 `slug` 均为 `供应商ID/模型ID`。
 - 真实 OpenCode（npm 1.2.22 / 1.2.25 与桌面版 2.0.6）：写入的 provider 段可被 `opencode debug config` 正常加载，`opencode models` 能列出全部 `llm-switch/*`，`opencode run --model llm-switch/<供应商ID>/<模型ID>` 经本机代理完成真实调用（chat 入口 → responses 上游），且配置改动无需重启即生效。两种形状分别验证：V1 形状两个版本都能读；V2 原生形状仅 2.x 能读（1.x 遇到未知键会整份配置报错），因此默认 auto 跟随现有文件。
 - 真实链路：模拟上游 → 代理（Responses 请求转换 Chat 流式回传）→ Codex 配置写入 → 界面全流程（截图见 `screenshots/`）。

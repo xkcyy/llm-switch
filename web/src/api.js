@@ -58,8 +58,7 @@ export const Api = {
     create: (providerId, body) => request(`/api/providers/${providerId}/models`, { method: 'POST', body }),
     update: (providerId, modelId, body) => request(`/api/providers/${providerId}/models/${modelId}`, { method: 'PUT', body }),
     remove: (providerId, modelId) => request(`/api/providers/${providerId}/models/${modelId}`, { method: 'DELETE' }),
-    test: (providerId, modelId) => request(`/api/providers/${providerId}/models/${modelId}/test`, { method: 'POST' }),
-    available: () => request('/api/models/available')
+    test: (providerId, modelId) => request(`/api/providers/${providerId}/models/${modelId}/test`, { method: 'POST' })
   },
 
   proxy: {

@@ -1,4 +1,4 @@
-// Package metadata 提供模型元数据的在线补全（上下文窗口、推理档位）。
+// Package metadata 提供模型元数据的在线补全（上下文窗口、推理档位、输入模态）。
 // 数据来源为公开的 models.dev 数据库，本地缓存，失败时静默降级。
 package metadata
 
@@ -14,9 +14,14 @@ import (
 )
 
 const (
-	sourceURL = "https://models.dev/api.json"
-	ttl       = 7 * 24 * time.Hour
+	ttl = 7 * 24 * time.Hour
+	// cacheVersion 是本地缓存的结构版本。字段含义变化时递增，旧缓存会被视为过期并
+	// 触发一次刷新（刷新失败仍继续用旧数据），避免新增字段长期读不到。
+	cacheVersion = 2
 )
+
+// sourceURL 是元数据源，测试可替换。
+var sourceURL = "https://models.dev/api.json"
 
 // presetNamespace 把供应商预置类型映射到 models.dev 的 provider 命名空间。
 var presetNamespace = map[string]string{
@@ -27,13 +32,15 @@ var presetNamespace = map[string]string{
 }
 
 type ModelMeta struct {
-	ContextWindow *int     `json:"context_window,omitempty"`
-	OutputTokens  *int     `json:"output_tokens,omitempty"`
-	Levels        []string `json:"levels,omitempty"`
-	Description   string   `json:"description,omitempty"`
+	ContextWindow   *int     `json:"context_window,omitempty"`
+	OutputTokens    *int     `json:"output_tokens,omitempty"`
+	Levels          []string `json:"levels,omitempty"`
+	Description     string   `json:"description,omitempty"`
+	InputModalities []string `json:"input_modalities,omitempty"`
 }
 
 type cacheFile struct {
+	Version   int                             `json:"version,omitempty"`
 	FetchedAt time.Time                       `json:"fetched_at"`
 	Providers map[string]map[string]ModelMeta `json:"providers"`
 }
@@ -123,12 +130,26 @@ func (c *Client) ensure() {
 			c.mu.Lock()
 			c.build(cf)
 			c.mu.Unlock()
-			if time.Since(cf.FetchedAt) < ttl {
+			if cf.Version == cacheVersion && time.Since(cf.FetchedAt) < ttl {
 				return
 			}
 		}
 	}
 	c.refresh()
+}
+
+// HasNamespace 判断该预设是否对应 models.dev 里一个可信的命名空间。
+// 只有命名空间命中时元数据才可用于判断能力；未知命名空间会退化为全局精确匹配，
+// 同名模型来自别家供应商，结论不可信（见 Lookup）。
+func (c *Client) HasNamespace(preset string) bool {
+	ns := presetNamespace[preset]
+	if ns == "" {
+		return false
+	}
+	c.ensure()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.namespaces[ns]
 }
 
 func (c *Client) refresh() {
@@ -143,7 +164,10 @@ func (c *Client) refresh() {
 	}
 	var raw map[string]struct {
 		Models map[string]struct {
-			Description      string `json:"description"`
+			Description string `json:"description"`
+			Modalities  struct {
+				Input []string `json:"input"`
+			} `json:"modalities"`
 			ReasoningOptions []struct {
 				Type   string   `json:"type"`
 				Values []string `json:"values"`
@@ -158,11 +182,14 @@ func (c *Client) refresh() {
 		slog.Debug("模型元数据解析失败", "error", err)
 		return
 	}
-	cf := cacheFile{FetchedAt: time.Now(), Providers: map[string]map[string]ModelMeta{}}
+	cf := cacheFile{Version: cacheVersion, FetchedAt: time.Now(), Providers: map[string]map[string]ModelMeta{}}
 	for ns, provider := range raw {
 		models := map[string]ModelMeta{}
 		for id, m := range provider.Models {
-			meta := ModelMeta{Description: m.Description, ContextWindow: m.Limit.Context, OutputTokens: m.Limit.Output}
+			meta := ModelMeta{
+				Description: m.Description, ContextWindow: m.Limit.Context, OutputTokens: m.Limit.Output,
+				InputModalities: m.Modalities.Input,
+			}
 			for _, opt := range m.ReasoningOptions {
 				if opt.Type == "effort" && len(opt.Values) > 0 {
 					meta.Levels = opt.Values

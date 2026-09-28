@@ -8,6 +8,7 @@ dist/*
 *.tmp
 *.log
 .llm-switch/
+_temps/
 
 # Python
 __pycache__/

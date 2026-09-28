@@ -63,6 +63,34 @@ func TestBuildCatalog(t *testing.T) {
 	}
 }
 
+// 图片输入：只有明确声明视觉能力才写 image，能力未知时保持纯文本。
+func TestBuildCatalogInputModalities(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.Models[0].Capabilities = []string{"tools", "vision"}
+	cat, err := BuildCatalog(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cat.Models[0].InputModalities; len(got) != 2 || got[0] != "text" || got[1] != "image" {
+		t.Fatalf("声明 vision 后 input_modalities = %v，want [text image]", got)
+	}
+
+	cfg = sampleConfig()
+	cfg.Models = cfg.Models[:1]
+	if got := mustCatalog(t, cfg).Models[0].InputModalities; len(got) != 1 || got[0] != "text" {
+		t.Fatalf("未声明视觉能力时 input_modalities = %v，want [text]", got)
+	}
+}
+
+func mustCatalog(t *testing.T, cfg *config.Config) Catalog {
+	t.Helper()
+	cat, err := BuildCatalog(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cat
+}
+
 func TestMergeConfigTOMLPreservesUserKeys(t *testing.T) {
 	existing := []byte(`
 model = "old"

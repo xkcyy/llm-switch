@@ -2,7 +2,7 @@
 # Usage: powershell -ExecutionPolicy Bypass -File build.ps1 [-Version 0.2.0] [-SkipUI]
 
 param(
-    [string]$Version = "0.4.0",
+    [string]$Version = "0.6.0",
     [switch]$SkipUI
 )
 
@@ -26,6 +26,11 @@ try {
 
     Write-Host "Building release..." -ForegroundColor Cyan
     New-Item -ItemType Directory -Force dist | Out-Null
+    # Windows locks a running EXE, so a rebuild cannot overwrite it in place.
+    if (Get-Process -Name 'LLM-Switch' -ErrorAction SilentlyContinue) {
+        Write-Warning "LLM Switch is running; dist\LLM-Switch.exe is locked. Quit the tray app (right-click its icon), then rebuild."
+        exit 1
+    }
     go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$Version" -o dist/LLM-Switch.exe ./cmd/llm-switch
     if ($LASTEXITCODE -ne 0) { throw "build failed" }
 

@@ -1,4 +1,4 @@
-package proxy
+package protocol
 
 import (
 	"sort"
@@ -7,18 +7,14 @@ import (
 	"time"
 )
 
-// reasoningPlaceholder 是思考内容缓存未命中时的回填文本。
-// 上游只校验字段存在与（部分网关要求的）非空，不校验内容本身；
-// 用固定占位而不是回放其他轮次的推理，避免把过期推理注入上下文。
-const reasoningPlaceholder = "(reasoning omitted)"
-
-// reasoningCache 缓存上游思考内容。
+// reasoningCache 缓存上游思考内容，供兼容扩展在构造下一轮请求时取用真实值。
 // DeepSeek 等思考型上游要求把上一轮的 reasoning_content 在下一轮带 tool_calls
-// 的 assistant 消息里回传，而 Responses 协议没有等价字段，
-// 因此在代理侧按「供应商 + 模型 + 工具调用 ID」暂存。
+// 的 assistant 消息里回传，而 Responses 协议没有等价字段（见 ADR-0001），
+// 因此在转换模块内部按「供应商 + 模型 + 工具调用 ID」暂存。
 //
-// 实测规则：每个带 tool_calls 的 assistant 消息都必须带该字段（缺失即 400），
-// 且部分网关把空串视为未回传，所以缓存未命中时由调用方回填非空占位文本。
+// 实测（对 opencode.ai/zen）：该字段只要缺失就报
+// 「The reasoning_content in the thinking mode must be passed back to the API」，
+// 回填非空占位可通过；但这只是兜底，真实值优先。
 type reasoningCache struct {
 	mu      sync.Mutex
 	entries map[string]reasoningEntry
@@ -43,6 +39,9 @@ const (
 	reasoningMaxTotalBytes = 32 << 20
 	reasoningMaxEntries    = 4096
 )
+
+// 进程内单例：转换模块自己持有这份状态，调用方不再传缓存句柄。
+var reasoningState = newReasoningCache()
 
 func newReasoningCache() *reasoningCache {
 	return &reasoningCache{
@@ -131,14 +130,10 @@ func (c *reasoningCache) pruneLocked(now time.Time) {
 	}
 }
 
-// needsReasoningEcho 判断该上游是否属于「思考模式必须回传 reasoning_content」的类型。
-// 命中缓存时无需判断；这里用于冷缓存（代理刚重启、上一轮未产出推理等）时仍能
-// 构造合法请求：字段存在且非空，上游不会校验内容本身。
-func needsReasoningEcho(m Match) bool {
-	switch m.Provider.Preset {
-	case "deepseek", "opencode-go":
-		return true
-	}
-	base := strings.ToLower(m.Provider.BaseURL)
-	return strings.Contains(base, "deepseek") || strings.Contains(base, "opencode.ai")
+func reasoningStore(providerID, modelID string, callIDs []string, text string) {
+	reasoningState.store(providerID, modelID, callIDs, text)
+}
+
+func reasoningGet(providerID, modelID, callID string) (string, bool) {
+	return reasoningState.get(providerID, modelID, callID)
 }

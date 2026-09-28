@@ -413,6 +413,7 @@ export default function Providers() {
                       maxOutputTokens: 16384,
                       levels: ['low', 'medium', 'high'],
                       protocol: undefined,
+                      vision: false,
                       enabled: true
                     })
                     setModelModal({ mode: 'add', provider: selected })
@@ -446,7 +447,16 @@ export default function Providers() {
                     render: (v, r) => (
                       <Tooltip title={v}>
                         <div style={{ minWidth: 0 }}>
-                          <Text className="mono">{v}</Text>
+                          <Space size={4}>
+                            <Text className="mono">{v}</Text>
+                            {(r.caps || []).includes('vision') && (
+                              <Tooltip title="已声明图片输入：Codex 可粘贴截图">
+                                <Tag bordered={false} color="blue" style={{ marginInlineEnd: 0 }}>
+                                  图片
+                                </Tag>
+                              </Tooltip>
+                            )}
+                          </Space>
                           {r.name && r.name !== v && (
                             <div className="provider-meta" style={{ marginTop: 0 }}>
                               {r.name}
@@ -532,6 +542,7 @@ export default function Providers() {
                                 maxOutputTokens: r.maxOutputTokens,
                                 levels: r.levels,
                                 protocol: r.protocol || undefined,
+                                vision: (r.caps || []).includes('vision'),
                                 enabled: r.enabled
                               })
                               setModelModal({ mode: 'edit', provider: selected, record: r })
@@ -644,6 +655,7 @@ export default function Providers() {
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             {(() => {
               const enriched = importState.list.filter((m) => m.context_window || m.levels?.length).length
+              const vision = importState.list.filter((m) => (m.capabilities || []).includes('vision')).length
               return (
                 <Alert
                   type={enriched ? 'success' : 'info'}
@@ -651,7 +663,7 @@ export default function Providers() {
                   message={enriched ? `已自动补全 ${enriched} 个模型的信息` : '这些模型暂时没有可补全的元数据'}
                   description={
                     enriched
-                      ? '上下文窗口和推理档位来自公开模型元数据，导入后仍可随时修改。'
+                      ? `上下文窗口、推理档位与图片输入来自上游或公开模型元数据${vision ? `（其中 ${vision} 个识别为支持图片）` : ''}，导入后仍可随时修改。`
                       : '导入后可以手动补充上下文窗口和推理档位，或点击「从上游同步模型」重试。'
                   }
                 />
@@ -696,7 +708,7 @@ export default function Providers() {
                 },
                 {
                   title: '输入窗口',
-                  dataIndex: 'contextWindow',
+                  dataIndex: 'context_window',
                   width: 76,
                   render: (v) =>
                     v ? (
@@ -709,12 +721,25 @@ export default function Providers() {
                 },
                 {
                   title: '输出窗口',
-                  dataIndex: 'maxOutputTokens',
+                  dataIndex: 'max_output_tokens',
                   width: 76,
                   render: (v) =>
                     v ? (
                       <Tag bordered={false} color="blue">
                         {formatK(v)} · 自动
+                      </Tag>
+                    ) : (
+                      <Text type="secondary">—</Text>
+                    )
+                },
+                {
+                  title: '图片输入',
+                  dataIndex: 'capabilities',
+                  width: 82,
+                  render: (v) =>
+                    (v || []).includes('vision') ? (
+                      <Tag bordered={false} color="blue">
+                        支持
                       </Tag>
                     ) : (
                       <Text type="secondary">—</Text>
@@ -882,6 +907,14 @@ export default function Providers() {
                 { value: 'messages', label: 'Anthropic Messages' }
               ]}
             />
+          </Form.Item>
+          <Form.Item
+            name="vision"
+            label="图片输入（视觉）"
+            valuePropName="checked"
+            extra="勾选后 Codex 模型清单声明支持图片，可在对话里粘贴截图；上游模型与协议确实支持时再勾选"
+          >
+            <Switch />
           </Form.Item>
           <Form.Item name="enabled" label="启用" valuePropName="checked">
             <Switch />

@@ -3,9 +3,77 @@ package protocol
 import (
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// ---- 测试辅助：走新接口（Prepare / Deliver） ----
+
+const testProvider = "test-provider"
+
+// toChatRequest 等价于旧的 Responses→Chat 请求转换。
+func toChatRequest(body []byte, model string) ([]byte, error) {
+	_, out, err := Prepare(Responses, Chat, body, Identity{ProviderID: testProvider, ModelID: model})
+	return out, err
+}
+
+// chatToResponsesResponse 等价于旧的 Chat 上游响应 → Responses 入口响应。
+func chatToResponsesResponse(body []byte) ([]byte, error) {
+	relay, _, err := Prepare(Responses, Chat, []byte(`{"model":"m","input":"hi"}`), Identity{ProviderID: testProvider, ModelID: "m"})
+	if err != nil {
+		return nil, err
+	}
+	rec := httptest.NewRecorder()
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	if _, err := relay.Deliver(200, h, strings.NewReader(string(body)), rec); err != nil {
+		return nil, err
+	}
+	return rec.Body.Bytes(), nil
+}
+
+// streamChatToResponses 等价于旧的 Chat 上游流 → Responses 入口流。
+func streamChatToResponses(in string, w io.Writer) error {
+	relay, _, err := Prepare(Responses, Chat, []byte(`{"model":"m","input":"hi","stream":true}`), Identity{ProviderID: testProvider, ModelID: "m"})
+	if err != nil {
+		return err
+	}
+	rec := httptest.NewRecorder()
+	h := http.Header{}
+	h.Set("Content-Type", "text/event-stream")
+	if _, err := relay.Deliver(200, h, strings.NewReader(in), rec); err != nil {
+		return err
+	}
+	_, err = w.Write(rec.Body.Bytes())
+	return err
+}
+
+// deliver 把上游响应交给 Relay，返回写给客户端的字节。
+func deliver(t *testing.T, relay *Relay, body, contentType string) ([]byte, error) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h := http.Header{}
+	if contentType != "" {
+		h.Set("Content-Type", contentType)
+	}
+	_, err := relay.Deliver(200, h, strings.NewReader(body), rec)
+	return rec.Body.Bytes(), err
+}
+
+// streamDeliver 同上，用于上游 SSE 流。
+func streamDeliver(t *testing.T, relay *Relay, in string, w io.Writer) error {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h := http.Header{}
+	h.Set("Content-Type", "text/event-stream")
+	if _, err := relay.Deliver(200, h, strings.NewReader(in), rec); err != nil {
+		return err
+	}
+	_, err := w.Write(rec.Body.Bytes())
+	return err
+}
 
 func TestResponsesToChatRequest(t *testing.T) {
 	body := []byte(`{
@@ -20,7 +88,7 @@ func TestResponsesToChatRequest(t *testing.T) {
 		"max_output_tokens": 123,
 		"stream": true
 	}`)
-	out, err := ResponsesToChatRequest(body, "deepseek-chat")
+	out, err := toChatRequest(body, "deepseek-chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +183,7 @@ func TestChatToResponsesResponse(t *testing.T) {
 		"choices": [{"message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
 		"usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
 	}`)
-	out, err := ChatToResponsesResponse(body)
+	out, err := chatToResponsesResponse(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +230,7 @@ func TestStreamChatToResponses(t *testing.T) {
 		``,
 	}, "\n")
 	var sb strings.Builder
-	if err := StreamChatToResponses(strings.NewReader(in), &sb, nil); err != nil {
+	if err := streamChatToResponses(in, &sb); err != nil {
 		t.Fatal(err)
 	}
 	out := sb.String()
@@ -271,7 +339,7 @@ func TestResponsesToChatParallelToolCalls(t *testing.T) {
 			{"type": "function_call_output", "call_id": "call_2", "output": "out-2"}
 		]
 	}`)
-	out, err := ResponsesToChatRequest(body, "m")
+	out, err := toChatRequest(body, "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +371,7 @@ func TestResponsesToChatOutputFoundAcrossMessages(t *testing.T) {
 			{"type": "function_call_output", "call_id": "call_1", "output": "ok"}
 		]
 	}`)
-	out, err := ResponsesToChatRequest(body, "m")
+	out, err := toChatRequest(body, "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,11 +396,11 @@ func TestResponsesToChatDropsOrphanToolOutput(t *testing.T) {
 			{"type": "function_call_output", "call_id": "call_ghost", "output": "ghost"}
 		]
 	}`)
-	var warnings []string
-	out, err := ResponsesToChatRequestWith(body, "m", ChatConvertOptions{OnWarning: func(s string) { warnings = append(warnings, s) }})
+	relay, out, err := Prepare(Responses, Chat, body, Identity{ProviderID: testProvider, ModelID: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	warnings := relay.warnings
 	msgs := parseChatMessages(t, out)
 	for _, m := range msgs {
 		if m.Role == "tool" {
@@ -352,7 +420,7 @@ func TestResponsesToChatSynthesizesMissingOutput(t *testing.T) {
 			{"type": "function_call", "name": "f", "arguments": "{}", "call_id": "call_1"}
 		]
 	}`)
-	out, err := ResponsesToChatRequest(body, "m")
+	out, err := toChatRequest(body, "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +444,7 @@ func TestResponsesToChatCustomTools(t *testing.T) {
 			{"type": "custom_tool_call_output", "call_id": "call_p", "output": "Done!"}
 		]
 	}`)
-	out, err := ResponsesToChatRequest(body, "m")
+	out, err := toChatRequest(body, "m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,37 +486,49 @@ func TestChatToResponsesCustomToolCallAndReasoning(t *testing.T) {
 			{"id": "call_f", "type": "function", "function": {"name": "exec_command", "arguments": "{}"}}
 		]}, "finish_reason": "tool_calls"}]
 	}`)
-	var gotReasoning string
-	var gotIDs []string
-	out, err := ChatToResponsesResponseWith(body, ResponseConvertOptions{
-		CustomTools: map[string]bool{"apply_patch": true},
-		OnReasoning: func(reasoning string, callIDs []string) { gotReasoning, gotIDs = reasoning, callIDs },
-	})
+	// 自定义工具名来自客户端请求（Responses 入口），由 Relay 带到响应侧。
+	req := []byte(`{"model":"m","input":"hi","tools":[{"type":"custom","name":"apply_patch","description":"patch"}]}`)
+	relay, _, err := Prepare(Responses, Chat, req, Identity{ProviderID: "custom-tool-sync", ModelID: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := deliver(t, relay, string(body), "application/json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var resp struct {
 		Output []struct {
-			Type   string `json:"type"`
-			Name   string `json:"name"`
-			Input  string `json:"input"`
-			CallID string `json:"call_id"`
+			Type    string `json:"type"`
+			Name    string `json:"name"`
+			Input   string `json:"input"`
+			CallID  string `json:"call_id"`
+			Summary []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"summary"`
 		} `json:"output"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Output) != 2 {
+	// 思考内容按标准路径下发为 reasoning 条目（排在正文与工具调用之前）
+	if len(resp.Output) != 3 {
 		t.Fatalf("output 数量错误: %+v", resp.Output)
 	}
-	if resp.Output[0].Type != "custom_tool_call" || resp.Output[0].Input != "*** Begin Patch" {
-		t.Fatalf("自定义工具调用未按 custom_tool_call 下发: %+v", resp.Output[0])
+	if resp.Output[0].Type != "reasoning" || len(resp.Output[0].Summary) != 1 || resp.Output[0].Summary[0].Text != "想一想" {
+		t.Fatalf("思考内容未按 reasoning 条目下发: %+v", resp.Output[0])
 	}
-	if resp.Output[1].Type != "function_call" {
-		t.Fatalf("普通函数调用被误判: %+v", resp.Output[1])
+	if resp.Output[1].Type != "custom_tool_call" || resp.Output[1].Input != "*** Begin Patch" {
+		t.Fatalf("自定义工具调用未按 custom_tool_call 下发: %+v", resp.Output[1])
 	}
-	if gotReasoning != "想一想" || len(gotIDs) != 2 {
-		t.Fatalf("思考内容未回调: %q %v", gotReasoning, gotIDs)
+	if resp.Output[2].Type != "function_call" {
+		t.Fatalf("普通函数调用被误判: %+v", resp.Output[2])
+	}
+	// 思考内容按「供应商 + 模型 + 调用 ID」落缓存，供下一轮回填
+	for _, id := range []string{"call_p", "call_f"} {
+		if v, ok := reasoningGet("custom-tool-sync", "m", id); !ok || v != "想一想" {
+			t.Fatalf("思考内容未入缓存 %s: %q %v", id, v, ok)
+		}
 	}
 }
 
@@ -465,14 +545,13 @@ func TestStreamChatToResponsesReasoningAndCustomTool(t *testing.T) {
 		`data: [DONE]`,
 		``,
 	}, "\n")
-	var sb strings.Builder
-	var gotReasoning string
-	var gotIDs []string
-	err := StreamChatToResponsesWith(strings.NewReader(in), &sb, nil, ResponseConvertOptions{
-		CustomTools: map[string]bool{"apply_patch": true},
-		OnReasoning: func(reasoning string, callIDs []string) { gotReasoning, gotIDs = reasoning, callIDs },
-	})
+	req := []byte(`{"model":"m","input":"hi","stream":true,"tools":[{"type":"custom","name":"apply_patch","description":"patch"}]}`)
+	relay, _, err := Prepare(Responses, Chat, req, Identity{ProviderID: "custom-tool-stream", ModelID: "m"})
 	if err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	if err := streamDeliver(t, relay, in, &sb); err != nil {
 		t.Fatal(err)
 	}
 	out := sb.String()
@@ -484,8 +563,8 @@ func TestStreamChatToResponsesReasoningAndCustomTool(t *testing.T) {
 	if strings.Contains(out, "response.function_call_arguments.delta") {
 		t.Fatalf("自定义工具不应产生 function_call 参数事件\n%s", out)
 	}
-	if gotReasoning != "推理" || len(gotIDs) != 1 || gotIDs[0] != "call_p" {
-		t.Fatalf("思考内容未回调: %q %v", gotReasoning, gotIDs)
+	if v, ok := reasoningGet("custom-tool-stream", "m", "call_p"); !ok || v != "推理" {
+		t.Fatalf("思考内容未入缓存: %q %v", v, ok)
 	}
 }
 
@@ -497,37 +576,80 @@ func TestResponsesToChatReasoningEcho(t *testing.T) {
 			{"type": "function_call_output", "call_id": "call_1", "output": "ok"}
 		]
 	}`)
-	out, err := ResponsesToChatRequestWith(body, "m", ChatConvertOptions{
-		Reasoning: func(callID string) (string, bool) {
-			if callID == "call_1" {
-				return "deepseek thinking", true
-			}
-			return "", false
-		},
-	})
+	// 转换只负责取出真实思考内容（键：供应商 + 模型 + 调用 ID）；
+	// 是否写入上游请求体由兼容扩展决定，见 compat.BeforeRequest。
+	reasoningStore("echo-hit", "m", []string{"call_1"}, "deepseek thinking")
+	relay, out, err := Prepare(Responses, Chat, body, Identity{ProviderID: "echo-hit", ModelID: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	msgs := parseChatMessages(t, out)
-	if msgs[0].ReasoningContent != "deepseek thinking" {
-		t.Fatalf("reasoning_content 未回填: %+v", msgs[0])
+	if text, ok := relay.LookupReasoning("call_1"); !ok || text != "deepseek thinking" {
+		t.Fatalf("缓存命中未暴露真实思考内容: %q %v", text, ok)
 	}
 
-	// 空值也要写入（上游要求字段存在）
-	out2, err := ResponsesToChatRequestWith(body, "m", ChatConvertOptions{
-		Reasoning: func(string) (string, bool) { return "", true },
-	})
+	// 转换本身不再往请求体写 reasoning_content（那是供应商策略）
+	if strings.Contains(string(out), "reasoning_content") {
+		t.Fatalf("转换层不应写入 reasoning_content: %s", out)
+	}
+
+	// 冷缓存：查不到，由调用方（兼容扩展）决定兜底
+	cold, _, err := Prepare(Responses, Chat, body, Identity{ProviderID: "echo-cold", ModelID: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out2), `"reasoning_content":""`) {
-		t.Fatalf("空思考内容应显式写入字段: %s", out2)
+	if _, ok := cold.LookupReasoning("call_1"); ok {
+		t.Fatal("冷缓存不应返回思考内容")
 	}
+}
 
-	// 未命中且上游不需要时不应写入该字段
-	out3, _ := ResponsesToChatRequest(body, "m")
-	if strings.Contains(string(out3), "reasoning_content") {
-		t.Fatalf("不需要时不应写入 reasoning_content: %s", out3)
+// 标准路径：客户端回传 reasoning 条目时，转换层把推理文本关联到对应工具调用，
+// 不依赖进程内缓存，也不需要占位文本。
+func TestResponsesToChatUsesEchoedReasoning(t *testing.T) {
+	body := []byte(`{
+		"model": "x",
+		"input": [
+			{"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "上一轮推理"}]},
+			{"type": "function_call", "name": "f", "arguments": "{}", "call_id": "call_echo"},
+			{"type": "function_call_output", "call_id": "call_echo", "output": "ok"}
+		]
+	}`)
+	relay, _, err := Prepare(Responses, Chat, body, Identity{ProviderID: "echo-std", ModelID: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, ok := relay.LookupReasoning("call_echo"); !ok || text != "上一轮推理" {
+		t.Fatalf("未关联客户端回传的推理内容: %q %v", text, ok)
+	}
+}
+
+// 流式：思考内容按标准事件下发为 reasoning 条目，供客户端下一轮原样回传。
+func TestStreamChatToResponsesEmitsReasoningItem(t *testing.T) {
+	in := strings.Join([]string{
+		`data: {"id":"c1","model":"m","choices":[{"delta":{"role":"assistant","reasoning_content":"先想一想"}}]}`,
+		``,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_r","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	relay, _, err := Prepare(Responses, Chat, []byte(`{"model":"m","input":"hi","stream":true}`), Identity{ProviderID: "rs-item-stream", ModelID: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	if err := streamDeliver(t, relay, in, &sb); err != nil {
+		t.Fatal(err)
+	}
+	out := sb.String()
+	for _, want := range []string{
+		`"type":"reasoning"`,
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"先想一想",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("流式输出缺少 %q\n%s", want, out)
+		}
 	}
 }
 
@@ -569,17 +691,18 @@ func TestStreamChatToResponsesCapturesReasoningOnAbortedStream(t *testing.T) {
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"f"}}]}}]}`,
 		``,
 	}, "\n")
-	var sb strings.Builder
-	var got string
-	var ids []string
-	err := StreamChatToResponsesWith(&failAfterReader{data: []byte(stream), err: io.ErrUnexpectedEOF}, &sb, nil, ResponseConvertOptions{
-		OnReasoning: func(reasoning string, callIDs []string) { got, ids = reasoning, callIDs },
-	})
-	if err == nil {
+	relay, _, perr := Prepare(Responses, Chat, []byte(`{"model":"m","input":"hi","stream":true}`), Identity{ProviderID: "abort-test", ModelID: "m"})
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	rec := httptest.NewRecorder()
+	h := http.Header{}
+	h.Set("Content-Type", "text/event-stream")
+	if _, err := relay.Deliver(200, h, &failAfterReader{data: []byte(stream), err: io.ErrUnexpectedEOF}, rec); err == nil {
 		t.Fatal("期望返回读取错误")
 	}
-	if got != "推理" || len(ids) != 1 || ids[0] != "call_x" {
-		t.Fatalf("流中断也应捕获思考内容: %q %v", got, ids)
+	if v, ok := reasoningGet("abort-test", "m", "call_x"); !ok || v != "推理" {
+		t.Fatalf("流中断也应捕获思考内容: %q %v", v, ok)
 	}
 }
 
@@ -593,16 +716,16 @@ func TestStreamChatToResponsesReasoningAlias(t *testing.T) {
 		`data: [DONE]`,
 		``,
 	}, "\n")
-	var sb strings.Builder
-	var got string
-	err := StreamChatToResponsesWith(strings.NewReader(stream), &sb, nil, ResponseConvertOptions{
-		OnReasoning: func(reasoning string, callIDs []string) { got = reasoning },
-	})
+	relay, _, err := Prepare(Responses, Chat, []byte(`{"model":"m","input":"hi","stream":true}`), Identity{ProviderID: "alias-stream", ModelID: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "R" {
-		t.Fatalf("reasoning 别名未解析: %q", got)
+	var sb strings.Builder
+	if err := streamDeliver(t, relay, stream, &sb); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := reasoningGet("alias-stream", "m", "call_y"); !ok || v != "R" {
+		t.Fatalf("reasoning 别名未解析: %q %v", v, ok)
 	}
 }
 
@@ -614,13 +737,180 @@ func TestChatToResponsesReasoningAlias(t *testing.T) {
 			{"id":"call_z","type":"function","function":{"name":"f","arguments":"{}"}}
 		]},"finish_reason":"tool_calls"}]
 	}`)
-	var got string
-	if _, err := ChatToResponsesResponseWith(body, ResponseConvertOptions{
-		OnReasoning: func(reasoning string, callIDs []string) { got = reasoning },
-	}); err != nil {
+	relay, _, err := Prepare(Responses, Chat, []byte(`{"model":"m","input":"hi"}`), Identity{ProviderID: "alias-sync", ModelID: "m"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "R" {
-		t.Fatalf("非流式 reasoning 别名未解析: %q", got)
+	if _, err := deliver(t, relay, string(body), "application/json"); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := reasoningGet("alias-sync", "m", "call_z"); !ok || v != "R" {
+		t.Fatalf("非流式 reasoning 别名未解析: %q %v", v, ok)
+	}
+}
+
+// ---- 图片输入：三种协议互转不得丢图 ----
+
+const testImageURI = "data:image/png;base64,iVBORw0KGgo="
+
+// imageRequest 是带文本与图片的 Responses 入口请求。
+func imageRequest() []byte {
+	return []byte(`{
+		"model": "m",
+		"input": [{"type": "message", "role": "user", "content": [
+			{"type": "input_text", "text": "看这张图"},
+			{"type": "input_image", "image_url": "` + testImageURI + `", "detail": "high"}
+		]}]
+	}`)
+}
+
+func TestResponsesToChatKeepsImages(t *testing.T) {
+	out, err := toChatRequest(imageRequest(), "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type     string `json:"type"`
+				Text     string `json:"text"`
+				ImageURL struct {
+					URL    string `json:"url"`
+					Detail string `json:"detail"`
+				} `json:"image_url"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 {
+		t.Fatalf("want 1 message, got %d: %s", len(req.Messages), out)
+	}
+	parts := req.Messages[0].Content
+	if len(parts) != 2 || parts[0].Type != "text" || parts[0].Text != "看这张图" {
+		t.Fatalf("文本块丢失: %s", out)
+	}
+	if parts[1].Type != "image_url" || parts[1].ImageURL.URL != testImageURI || parts[1].ImageURL.Detail != "high" {
+		t.Fatalf("图片块丢失或变形: %s", out)
+	}
+}
+
+func TestResponsesToMessagesKeepsImages(t *testing.T) {
+	out, err := ResponsesToMessagesRequest(imageRequest(), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req struct {
+		Messages []struct {
+			Content []struct {
+				Type   string `json:"type"`
+				Text   string `json:"text"`
+				Source struct {
+					Type      string `json:"type"`
+					MediaType string `json:"media_type"`
+					Data      string `json:"data"`
+				} `json:"source"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 || len(req.Messages[0].Content) != 2 {
+		t.Fatalf("消息块数量不对: %s", out)
+	}
+	img := req.Messages[0].Content[1]
+	if img.Type != "image" || img.Source.Type != "base64" || img.Source.MediaType != "image/png" {
+		t.Fatalf("data URI 未转成 base64 图片块: %s", out)
+	}
+}
+
+// Chat 入口（含图片数组）→ Responses 上游必须保留 input_image。
+func TestChatToResponsesKeepsImages(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":[
+		{"type":"text","text":"看图"},
+		{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}
+	]}]}`)
+	_, out, err := Prepare(Chat, Responses, body, Identity{ProviderID: testProvider, ModelID: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req struct {
+		Input []struct {
+			Content []struct {
+				Type     string `json:"type"`
+				Text     string `json:"text"`
+				ImageURL string `json:"image_url"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Input) != 1 || len(req.Input[0].Content) != 2 {
+		t.Fatalf("content 块数量不对: %s", out)
+	}
+	img := req.Input[0].Content[1]
+	if img.Type != "input_image" || img.ImageURL != "https://example.com/a.png" {
+		t.Fatalf("图片未转成 input_image: %s", out)
+	}
+}
+
+// Chat 入口 → Messages 上游：远程地址按 URL 图片块下发。
+func TestChatToMessagesKeepsImages(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":[
+		{"type":"text","text":"看图"},
+		{"type":"image_url","image_url":"https://example.com/a.png"}
+	]}]}`)
+	out, err := ChatToMessagesRequest(body, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req struct {
+		Messages []struct {
+			Content []struct {
+				Type   string `json:"type"`
+				Source struct {
+					Type string `json:"type"`
+					URL  string `json:"url"`
+				} `json:"source"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 || len(req.Messages[0].Content) != 2 {
+		t.Fatalf("content 块数量不对: %s", out)
+	}
+	img := req.Messages[0].Content[1]
+	if img.Type != "image" || img.Source.Type != "url" || img.Source.URL != "https://example.com/a.png" {
+		t.Fatalf("远程图片未转成 URL 图片块: %s", out)
+	}
+}
+
+// 只有图片没有文本时，content 里不应再补空文本块。
+func TestChatImageOnlyMessageKeepsTextlessContent(t *testing.T) {
+	body := []byte(`{"model":"m","input":[{"type":"message","role":"user","content":[
+		{"type":"input_image","image_url":"` + testImageURI + `"}
+	]}]}`)
+	out, err := toChatRequest(body, "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req struct {
+		Messages []struct {
+			Content []struct {
+				Type string `json:"type"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 || len(req.Messages[0].Content) != 1 || req.Messages[0].Content[0].Type != "image_url" {
+		t.Fatalf("纯图片消息内容块不对: %s", out)
 	}
 }

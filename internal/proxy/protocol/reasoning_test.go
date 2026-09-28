@@ -1,16 +1,10 @@
-package proxy
+package protocol
 
 import (
 	"strings"
 	"testing"
 	"time"
-
-	"llm-switch/internal/config"
 )
-
-func provider(preset, baseURL string) config.Provider {
-	return config.Provider{Preset: preset, BaseURL: baseURL}
-}
 
 func TestReasoningCacheStoreGet(t *testing.T) {
 	c := newReasoningCache()
@@ -68,24 +62,5 @@ func TestReasoningCacheEvictsWhenFull(t *testing.T) {
 	}
 	if _, ok := c.get("p", "m", "c"); !ok {
 		t.Fatal("最新条目应保留")
-	}
-}
-
-func TestNeedsReasoningEcho(t *testing.T) {
-	cases := []struct {
-		name string
-		m    Match
-		want bool
-	}{
-		{"deepseek 预置", Match{Provider: provider("deepseek", "https://api.deepseek.com")}, true},
-		{"opencode-go 预置", Match{Provider: provider("opencode-go", "https://opencode.ai/zen/go/v1")}, true},
-		{"地址含 opencode", Match{Provider: provider("custom", "https://opencode.ai/zen/v1")}, true},
-		{"地址含 deepseek", Match{Provider: provider("custom", "https://proxy.example.com/deepseek/v1")}, true},
-		{"普通网关", Match{Provider: provider("custom", "https://api.example.com/v1")}, false},
-	}
-	for _, tc := range cases {
-		if got := needsReasoningEcho(tc.m); got != tc.want {
-			t.Fatalf("%s: got %v want %v", tc.name, got, tc.want)
-		}
 	}
 }

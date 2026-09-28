@@ -116,6 +116,15 @@ const mapTrae = (t) => ({
 })
 
 const midLevel = (levels) => levels[Math.floor((levels.length - 1) / 2)] || 'medium'
+
+// mergeCaps 维护模型能力：图片输入即 capabilities 里的 vision，
+// 其余能力保持不变；空列表按最小可用集合 tools 处理。
+const mergeCaps = (caps, vision) => {
+  const base = (caps || []).filter((c) => c !== 'vision')
+  const list = base.length ? base : ['tools']
+  return vision ? [...list, 'vision'] : list
+}
+
 const toModelBody = (m) => ({
   id: m.id,
   name: m.name || m.id,
@@ -178,6 +187,16 @@ export function AppStoreProvider({ children }) {
     const flat = results.flat().map(mapModel)
     setModels(flat)
     return flat
+  }
+
+  // 服务端会在删除 / 停用 / 改名时自动维持「默认模型必须可用」，写完读回权威值。
+  const refreshDefaultModel = async () => {
+    try {
+      const ov = await Api.overview()
+      setDefaultModelState(ov.default_model || '')
+    } catch {
+      // 读不到就保持现状，不打断主流程
+    }
   }
 
   // 逐项加载：单类数据出问题只提示，不影响其他功能可用
@@ -295,6 +314,7 @@ export function AppStoreProvider({ children }) {
           )
           setDefaultModelState((prev) => (prev.startsWith(id + '/') ? mapped.id + prev.slice(id.length) : prev))
         }
+        await refreshDefaultModel()
         return mapped
       },
 
@@ -302,6 +322,7 @@ export function AppStoreProvider({ children }) {
         await Api.providers.remove(id)
         setProviders((prev) => prev.filter((p) => p.id !== id))
         setModels((prev) => prev.filter((m) => m.providerId !== id))
+        await refreshDefaultModel()
         message.success('供应商已删除')
       },
 
@@ -336,6 +357,7 @@ export function AppStoreProvider({ children }) {
               contextWindow: remote.context_window ?? null,
               maxOutputTokens: remote.max_output_tokens ?? null,
               levels: remote.levels || null,
+              caps: remote.capabilities || [],
               protocol: remote.protocol || ''
             }))
           } catch {
@@ -358,6 +380,7 @@ export function AppStoreProvider({ children }) {
         if (!m) return
         await Api.models.update(m.providerId, m.id, { ...toModelBody(m), enabled })
         setModels((prev) => prev.map((x) => (x.id === id ? { ...x, enabled } : x)))
+        await refreshDefaultModel()
       },
 
       async removeModel(id) {
@@ -365,6 +388,7 @@ export function AppStoreProvider({ children }) {
         if (!m) return
         await Api.models.remove(m.providerId, m.id)
         setModels((prev) => prev.filter((x) => x.id !== id))
+        await refreshDefaultModel()
         message.success('模型已删除')
       },
 
@@ -383,12 +407,14 @@ export function AppStoreProvider({ children }) {
       },
 
       async saveModel(providerId, values, editId) {
+        const existing = editId ? models.find((m) => m.id === editId && m.providerId === providerId) : null
         const body = toModelBody({
           id: values.id,
           name: values.name,
           contextWindow: values.contextWindow,
           maxOutputTokens: values.maxOutputTokens,
           levels: values.levels,
+          caps: mergeCaps(existing?.caps, values.vision),
           protocol: values.protocol,
           enabled: values.enabled
         })
@@ -398,6 +424,7 @@ export function AppStoreProvider({ children }) {
           await Api.models.create(providerId, body)
         }
         await refreshModels()
+        await refreshDefaultModel()
         message.success(editId ? '模型已更新' : '模型已添加')
       },
 

@@ -13,6 +13,8 @@ import (
 	"llm-switch/internal/buildinfo"
 	"llm-switch/internal/config"
 	"llm-switch/internal/metadata"
+	"llm-switch/internal/proxy/protocol"
+	"llm-switch/internal/upstream"
 )
 
 type Service struct {
@@ -37,7 +39,8 @@ type RemoteModel struct {
 	MaxOutputTokens *int     `json:"max_output_tokens,omitempty"`
 	Levels          []string `json:"levels,omitempty"`
 	Description     string   `json:"description,omitempty"`
-	Protocol        string   `json:"protocol,omitempty"` // 建议的上游协议（部分网关的模型分散在不同端点）
+	Protocol        string   `json:"protocol,omitempty"`     // 建议的上游协议（部分网关的模型分散在不同端点）
+	Capabilities    []string `json:"capabilities,omitempty"` // 只含可确证的图片输入（vision）
 }
 
 // suggestProtocol 针对多端点网关给出模型级协议建议。
@@ -65,42 +68,13 @@ func NewService(store *config.Store, meta *metadata.Client) *Service {
 	}
 }
 
-func joinURL(base, suffix string) string {
-	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(suffix, "/")
-}
-
-func applyAuth(req *http.Request, p config.Provider, proto string) {
-	switch p.Auth.Type {
-	case "api_key_header", "custom":
-		h := p.Auth.Header
-		if h == "" {
-			h = "x-api-key"
-		}
-		if p.Auth.APIKey != "" {
-			req.Header.Set(h, p.Auth.APIKey)
-		}
-	case "bearer", "":
-		if p.Auth.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+p.Auth.APIKey)
-		}
+// parseProtocol 把配置里的协议字符串转为协议值。
+// UpstreamProtocols 已保证取值合法，这里的兜底只为保持历史行为（未知按 Chat 处理）。
+func parseProtocol(s string) protocol.Protocol {
+	if p, err := protocol.Parse(s); err == nil {
+		return p
 	}
-	if proto == "messages" {
-		if req.Header.Get("anthropic-version") == "" {
-			req.Header.Set("anthropic-version", "2023-06-01")
-		}
-	}
-}
-
-// protocolPath 返回协议对应的上游路径（相对 base_url）。
-func protocolPath(proto string) string {
-	switch proto {
-	case "responses":
-		return "responses"
-	case "messages":
-		return "messages"
-	default:
-		return "chat/completions"
-	}
+	return protocol.Chat
 }
 
 func classify(status int, err error) (string, string) {
@@ -125,34 +99,34 @@ func classify(status int, err error) (string, string) {
 }
 
 // probeProtocol 用最小请求探测某个协议是否可用。
-func (s *Service) probeProtocol(ctx context.Context, p config.Provider, proto, model string) TestResult {
+func (s *Service) probeProtocol(ctx context.Context, p config.Provider, proto protocol.Protocol, model string) TestResult {
 	body, err := minimalRequestBody(proto, model)
 	if err != nil {
 		return TestResult{ErrorType: "config", Message: err.Error()}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, joinURL(p.BaseURL, protocolPath(proto)), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstream.URL(p.BaseURL, proto.UpstreamPath()), bytes.NewReader(body))
 	if err != nil {
 		return TestResult{ErrorType: "address", Message: err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", buildinfo.UserAgent())
-	applyAuth(req, p, proto)
+	upstream.SetAuth(req, p, proto)
 	start := time.Now()
 	resp, err := s.client.Do(req)
 	if err != nil {
 		et, msg := classify(0, err)
-		return TestResult{ErrorType: et, Message: msg, LatencyMS: time.Since(start).Milliseconds(), Protocol: proto}
+		return TestResult{ErrorType: et, Message: msg, LatencyMS: time.Since(start).Milliseconds(), Protocol: string(proto)}
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	if resp.StatusCode < 400 {
-		return TestResult{OK: true, LatencyMS: time.Since(start).Milliseconds(), Protocol: proto}
+		return TestResult{OK: true, LatencyMS: time.Since(start).Milliseconds(), Protocol: string(proto)}
 	}
 	et, msg := classify(resp.StatusCode, nil)
 	if msg == "" {
 		msg = strings.TrimSpace(string(b))
 	}
-	return TestResult{ErrorType: et, Message: msg, LatencyMS: time.Since(start).Milliseconds(), Protocol: proto}
+	return TestResult{ErrorType: et, Message: msg, LatencyMS: time.Since(start).Milliseconds(), Protocol: string(proto)}
 }
 
 // probeAllProtocols 按配置顺序探测供应商声明的所有协议，返回第一个可用的。
@@ -160,15 +134,15 @@ func (s *Service) probeAllProtocols(ctx context.Context, p config.Provider, mode
 	start := time.Now()
 	failures := make([]string, 0, len(p.UpstreamProtocols()))
 	var first TestResult
-	for _, proto := range p.UpstreamProtocols() {
-		res := s.probeProtocol(ctx, p, proto, model)
+	for _, raw := range p.UpstreamProtocols() {
+		res := s.probeProtocol(ctx, p, parseProtocol(raw), model)
 		if res.OK {
 			return res
 		}
 		if len(failures) == 0 {
 			first = res
 		}
-		failures = append(failures, fmt.Sprintf("%s: %s", proto, res.Message))
+		failures = append(failures, fmt.Sprintf("%s: %s", raw, res.Message))
 	}
 	if first.ErrorType == "" && len(failures) == 0 {
 		return TestResult{ErrorType: "config", Message: "未配置任何协议"}
@@ -193,11 +167,11 @@ func (s *Service) Test(ctx context.Context, providerID string) TestResult {
 	}
 
 	// 尚无模型：用 /models 做连通性探测（无法判定具体协议）
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinURL(p.BaseURL, "models"), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream.URL(p.BaseURL, "models"), nil)
 	if err != nil {
 		return TestResult{ErrorType: "address", Message: err.Error()}
 	}
-	applyAuth(req, p, p.UpstreamProtocols()[0])
+	upstream.SetAuth(req, p, parseProtocol(p.UpstreamProtocols()[0]))
 	resp, err := s.client.Do(req)
 	if err != nil {
 		et, msg := classify(0, err)
@@ -237,11 +211,11 @@ func (s *Service) FetchModels(ctx context.Context, providerID string) ([]RemoteM
 	if !ok {
 		return nil, fmt.Errorf("供应商不存在")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinURL(p.BaseURL, "models"), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream.URL(p.BaseURL, "models"), nil)
 	if err != nil {
 		return nil, err
 	}
-	applyAuth(req, p, p.UpstreamProtocols()[0])
+	upstream.SetAuth(req, p, parseProtocol(p.UpstreamProtocols()[0]))
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -254,9 +228,10 @@ func (s *Service) FetchModels(ctx context.Context, providerID string) ([]RemoteM
 	}
 	var parsed struct {
 		Data []struct {
-			ID      string `json:"id"`
-			Name    string `json:"display_name"`
-			RawName string `json:"name"`
+			ID      string   `json:"id"`
+			Name    string   `json:"display_name"`
+			RawName string   `json:"name"`
+			Input   []string `json:"input_modalities"` // 部分上游（如 DeepSeek）在此自述输入模态
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(b, &parsed); err != nil {
@@ -280,23 +255,43 @@ func (s *Service) FetchModels(ctx context.Context, providerID string) ([]RemoteM
 				if rm.Description == "" {
 					rm.Description = meta.Description
 				}
+				// 只有命名空间可信时才用在线元数据判断能力：未知命名空间会全局匹配到
+				// 别家供应商的同名模型，据此声明图片输入会误导 Codex。
+				if s.meta.HasNamespace(p.Preset) {
+					rm.Capabilities = capabilitiesFromModalities(meta.InputModalities)
+				}
 			}
+		}
+		// 上游自述优先于在线元数据
+		if caps := capabilitiesFromModalities(m.Input); len(caps) > 0 {
+			rm.Capabilities = caps
 		}
 		out = append(out, rm)
 	}
 	return out, nil
 }
 
-func minimalRequestBody(protocol, model string) ([]byte, error) {
-	switch protocol {
-	case "responses":
+// capabilitiesFromModalities 把输入模态映射为模型能力，只认「图片输入」。
+// 没有明确声明 image 时返回 nil，交由配置层保持「未知」。
+func capabilitiesFromModalities(modalities []string) []string {
+	for _, m := range modalities {
+		if strings.EqualFold(strings.TrimSpace(m), "image") {
+			return []string{"tools", "vision"}
+		}
+	}
+	return nil
+}
+
+func minimalRequestBody(proto protocol.Protocol, model string) ([]byte, error) {
+	switch proto {
+	case protocol.Responses:
 		return json.Marshal(map[string]any{
 			"model":             model,
 			"input":             "ping",
 			"max_output_tokens": 16,
 			"store":             false,
 		})
-	case "messages":
+	case protocol.Messages:
 		return json.Marshal(map[string]any{
 			"model":      model,
 			"max_tokens": 1,

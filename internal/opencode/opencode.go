@@ -214,18 +214,10 @@ func modelEntry(m config.Model, slug, shape string) map[string]any {
 func buildProvider(cfg *config.Config, baseURL, shape string) (map[string]any, []string) {
 	models := map[string]any{}
 	keys := []string{}
-	for _, m := range cfg.Models {
-		if !m.Enabled {
-			continue
-		}
-		p, ok := cfg.FindProvider(m.ProviderID)
-		if !ok || !p.Enabled {
-			continue
-		}
+	for _, a := range cfg.AvailableModels() {
 		// 模型键即请求名：供应商ID/模型ID，保证代理侧确定性匹配（同名模型不歧义）
-		slug := p.ID + "/" + m.ID
-		models[slug] = modelEntry(m, slug, shape)
-		keys = append(keys, slug)
+		models[a.Slug] = modelEntry(a.Model, a.Slug, shape)
+		keys = append(keys, a.Slug)
 	}
 	sort.Strings(keys)
 	if shape == ShapeV2 {
@@ -361,8 +353,8 @@ func (s *Service) BuildPlan(ov Overrides) (*Plan, error) {
 				plan.Warnings = append(plan.Warnings, fmt.Sprintf("默认模型 %q 不在可用模型里，已改用 %q", cfg.Settings.DefaultModel, def))
 			}
 		}
-		doc["model"] = ProviderID + "/" + def
-		plan.Model = ProviderID + "/" + def
+		doc["model"] = config.ModelSlug(ProviderID, def)
+		plan.Model = config.ModelSlug(ProviderID, def)
 	case ov.UseDefaultModel != nil && !*ov.UseDefaultModel:
 		if ours {
 			delete(doc, "model")
@@ -376,8 +368,8 @@ func (s *Service) BuildPlan(ov Overrides) (*Plan, error) {
 			if !contains(keys, def) {
 				def = keys[0]
 			}
-			doc["model"] = ProviderID + "/" + def
-			plan.Model = ProviderID + "/" + def
+			doc["model"] = config.ModelSlug(ProviderID, def)
+			plan.Model = config.ModelSlug(ProviderID, def)
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("OpenCode 默认模型 %q 已失效，已自动改用 %q", rootModel, plan.Model))
 		}
 	}
