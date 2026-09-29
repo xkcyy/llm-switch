@@ -730,6 +730,37 @@ func PatchModel(body []byte, model string) ([]byte, error) {
 	return marshal(m)
 }
 
+// ensureIncludeUsage 给 chat 流式请求补上 stream_options.include_usage：上游默认不回 usage，
+// 补上才不会丢用量（见 docs/adr/0002）；客户端已显式打开则不动。
+// 解析失败时原样返回——不因统计需求破坏转发。
+func ensureIncludeUsage(body []byte, stream bool) []byte {
+	if !stream {
+		return body
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(body, &m) != nil {
+		return body
+	}
+	opts := map[string]any{}
+	if raw, ok := m["stream_options"]; ok {
+		_ = json.Unmarshal(raw, &opts)
+	}
+	if v, ok := opts["include_usage"].(bool); ok && v {
+		return body
+	}
+	opts["include_usage"] = true
+	b, err := json.Marshal(opts)
+	if err != nil {
+		return body
+	}
+	m["stream_options"] = b
+	out, err := marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // ---- 非流式响应转换 ----
 
 type chatResponse struct {

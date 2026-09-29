@@ -133,6 +133,9 @@ func (a *App) OpenUI() {
 func (a *App) Shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if err := a.Proxy.Close(); err != nil {
+		slog.Warn("用量统计落盘失败", "error", err)
+	}
 	a.Proxy.Stop(ctx)
 	a.Admin.Stop(ctx)
 	slog.Info("LLM Switch 已退出")

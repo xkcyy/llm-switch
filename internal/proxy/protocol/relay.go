@@ -65,6 +65,9 @@ type Relay struct {
 	captureReasoning bool
 	reasoning        strings.Builder
 	callIDs          []string
+
+	// usage 由响应侧解析填充，经 Outcome 交回调用方。
+	usage *CallUsage
 }
 
 // LookupReasoning 返回某个工具调用对应的真实思考内容：先查代理侧缓存
@@ -89,6 +92,8 @@ type Outcome struct {
 	// UpstreamBody 仅在上游返回 >= 400 时填充（已限长），供调用方记录错误摘要。
 	UpstreamStatus int
 	UpstreamBody   []byte
+	// Usage 是本次响应上报的用量；nil 表示上游没给，调用方据此记无用量，不估算。
+	Usage *CallUsage
 }
 
 // encodeContext 是编码器可用的请求侧上下文：上游身份、自定义工具名、告警出口。
@@ -110,6 +115,10 @@ func Prepare(entry, up Protocol, body []byte, id Identity) (*Relay, []byte, erro
 		out, err := PatchModel(body, id.ModelID)
 		if err != nil {
 			return nil, nil, err
+		}
+		// 直通不再严格「原样」：chat 流式补 include_usage，否则上游不回 usage。
+		if entry == Chat {
+			out = ensureIncludeUsage(out, r.stream)
 		}
 		return r, out, nil
 	}
@@ -162,26 +171,37 @@ func (r *Relay) Deliver(status int, header http.Header, body io.Reader, w http.R
 		setSSEHeaders(w)
 		w.WriteHeader(status)
 		flush := flushFunc(w)
-		if r.legacy {
-			err := legacyStream(r.entry, body, w, flush)
-			return r.outcome(), err
+		// 流式用量统一旁路采集：扫描器只读不写，转发的字节原样放行。
+		scan := &usageScanner{r: body}
+		var err error
+		switch {
+		case r.legacy:
+			err = legacyStream(r.entry, scan, w, flush)
+		case r.entry == r.up:
+			err = passthroughStream(scan, w, flush)
+		default:
+			enc := newStreamEncoder(r, w, flush)
+			err = decodeStream(r.up, scan, r.capture(enc.Emit))
+			r.finishReasoning()
+			if err == nil {
+				err = enc.Close()
+			}
 		}
-		if r.entry == r.up {
-			return r.outcome(), passthroughStream(body, w, flush)
+		if scan.found {
+			u := scan.usage
+			r.usage = &u
 		}
-		enc := newStreamEncoder(r, w, flush)
-		err := decodeStream(r.up, body, r.capture(enc.Emit))
-		r.finishReasoning()
-		if err != nil {
-			return r.outcome(), err
-		}
-		return r.outcome(), enc.Close()
+		return r.outcome(), err
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(body, maxResponseBytes))
 	if err != nil {
 		WriteError(w, r.entry, http.StatusBadGateway, "读取上游响应失败")
 		return r.outcome(), err
+	}
+	// 非流式：直通 / legacy / 转换三个分支都能从原始响应体取到用量。
+	if u, ok := ParseUsage(raw); ok {
+		r.usage = &u
 	}
 	if r.entry == r.up {
 		writeContentType(w, header)
@@ -222,7 +242,7 @@ func (r *Relay) context() *encodeContext {
 }
 
 func (r *Relay) outcome() Outcome {
-	return Outcome{Warnings: r.warnings}
+	return Outcome{Warnings: r.warnings, Usage: r.usage}
 }
 
 // capture 包装事件回调，累积思考内容与工具调用 ID 供后续请求回填。

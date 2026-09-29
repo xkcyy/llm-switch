@@ -41,6 +41,10 @@ async function request(path, { method = 'GET', body } = {}) {
 
 export const Api = {
   overview: () => request('/api/overview'),
+  usage: {
+    summary: () => request('/api/usage'),
+    report: (params = {}) => request(`/api/usage/report?${new URLSearchParams(params)}`)
+  },
 
   providers: {
     list: () => request('/api/providers'),

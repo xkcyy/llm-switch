@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"llm-switch/internal/proxy/protocol"
 	"llm-switch/internal/proxy/protocol/compat"
 	"llm-switch/internal/upstream"
+	"llm-switch/internal/usage"
 )
 
 const maxBodyBytes = 32 << 20
@@ -70,6 +72,8 @@ type Server struct {
 
 	recMu   sync.Mutex
 	records []Record
+
+	usageStore *usage.Store
 }
 
 func NewServer(store *config.Store, index *Holder) *Server {
@@ -82,12 +86,25 @@ func NewServer(store *config.Store, index *Holder) *Server {
 		ResponseHeaderTimeout: 90 * time.Second,
 		ForceAttemptHTTP2:     true,
 	}
+	// 用量落盘到配置文件同级的 stats/ 目录，测试的临时目录也因此互不干扰。
+	usageStore, err := usage.Open(filepath.Join(filepath.Dir(store.Path()), "stats", "usage.json"))
+	if err != nil {
+		slog.Warn("用量统计加载失败，本次运行不落盘", "error", err)
+		usageStore = usage.NewStore()
+	}
 	return &Server{
-		store:  store,
-		index:  index,
-		client: &http.Client{Transport: transport},
+		store:      store,
+		index:      index,
+		client:     &http.Client{Transport: transport},
+		usageStore: usageStore,
 	}
 }
+
+// Usage 返回用量统计存储，供管理面查询。
+func (s *Server) Usage() *usage.Store { return s.usageStore }
+
+// Close 落盘用量统计，进程退出前调用。
+func (s *Server) Close() error { return s.usageStore.Close() }
 
 func (s *Server) Running() bool {
 	s.mu.Lock()
@@ -379,6 +396,17 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 		slog.Warn("流式转换中断", "error", derr)
 	}
 	rec.DurationMS = time.Since(start).Milliseconds()
+	recUsage := usage.Entry{
+		Time: rec.Time, ProviderID: match.Provider.ID, ProviderName: match.Provider.Name,
+		ModelID: match.Model.ID, ModelName: match.Model.Name, Caller: rec.Source,
+		OK:       rec.Status >= 200 && rec.Status < 300 && rec.Error == "",
+		HasUsage: out.Usage != nil,
+	}
+	if out.Usage != nil {
+		recUsage.Input, recUsage.Output, recUsage.Total = out.Usage.Input, out.Usage.Output, out.Usage.Total
+		recUsage.Cached, recUsage.CacheWrite, recUsage.Reasoning = out.Usage.Cached, out.Usage.CacheWrite, out.Usage.Reasoning
+	}
+	s.usageStore.Add(recUsage)
 	s.log(rec)
 }
 

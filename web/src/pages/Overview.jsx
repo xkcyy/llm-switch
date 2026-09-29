@@ -9,6 +9,7 @@ import {
   ThunderboltOutlined
 } from '@ant-design/icons'
 import { useApp } from '../store'
+import { fmtTokens } from '../format'
 
 const { Text } = Typography
 
@@ -119,6 +120,36 @@ export default function Overview({ onNavigate }) {
             }
             icon={agents.length ? <CheckCircleFilled /> : <ApiOutlined />}
             accent={agents.length ? '#52c41a' : '#8c93a4'}
+          />
+        </Col>
+      </Row>
+
+      <Row gutter={16}>
+        <Col span={8}>
+          <StatCard
+            label="今日调用"
+            value={app.usage?.today?.requests ?? 0}
+            extra={app.usage?.today?.err ? `${app.usage.today.err} 次失败` : '全部成功'}
+            icon={<ThunderboltOutlined />}
+            accent="#2f6bff"
+          />
+        </Col>
+        <Col span={8}>
+          <StatCard
+            label="今日 Token"
+            value={fmtTokens(app.usage?.today?.total_tokens)}
+            extra={`输入 ${fmtTokens(app.usage?.today?.input_tokens)} · 输出 ${fmtTokens(app.usage?.today?.output_tokens)}`}
+            icon={<CloudServerOutlined />}
+            accent="#13a8a8"
+          />
+        </Col>
+        <Col span={8}>
+          <StatCard
+            label="累计 Token"
+            value={fmtTokens(app.usage?.total?.total_tokens)}
+            extra={`累计 ${app.usage?.total?.requests ?? 0} 次调用`}
+            icon={<ApiOutlined />}
+            accent="#fa8c16"
           />
         </Col>
       </Row>

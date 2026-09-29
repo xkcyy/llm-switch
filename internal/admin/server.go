@@ -25,6 +25,7 @@ import (
 	"llm-switch/internal/provider"
 	"llm-switch/internal/proxy"
 	"llm-switch/internal/trae"
+	"llm-switch/internal/usage"
 	"llm-switch/internal/winutil"
 )
 
@@ -146,6 +147,8 @@ func (s *Server) registerStatic(mux *http.ServeMux) {
 
 func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
+	mux.HandleFunc("GET /api/usage", s.handleUsage)
+	mux.HandleFunc("GET /api/usage/report", s.handleUsageReport)
 
 	mux.HandleFunc("GET /api/providers", s.handleProviderList)
 	mux.HandleFunc("POST /api/providers", s.handleProviderCreate)
@@ -216,6 +219,106 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- 供应商 ----
+
+// ---- 用量 ----
+
+// handleUsage 返回累计与今日的用量合计。时间粒度与分组查询在后续迭代补齐。
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	store := s.proxy.Usage()
+	now := time.Now()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	writeJSON(w, 200, map[string]any{
+		"total": store.Totals(time.Time{}, now),
+		"today": store.Totals(dayStart, dayStart),
+	})
+}
+
+// handleUsageReport 返回用量报表：按分组的时间序列 + 分组明细。
+// range 取值 today / 7d / month / 30d / custom；group 取值 all / provider / model。
+func (s *Server) handleUsageReport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	now := time.Now()
+	loc := now.Location()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+
+	span := q.Get("range")
+	if span == "" {
+		span = "30d"
+	}
+	from, to, gran := today.AddDate(0, 0, -29), today, usage.GranDay
+	switch span {
+	case "today":
+		from, to, gran = today, today.Add(23*time.Hour), usage.GranHour
+	case "7d":
+		from, to = today.AddDate(0, 0, -6), today
+	case "month":
+		from, to = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc), today
+	case "custom":
+		f, errF := time.ParseInLocation("2006-01-02", q.Get("from"), loc)
+		t, errT := time.ParseInLocation("2006-01-02", q.Get("to"), loc)
+		if errF == nil && errT == nil && !t.Before(f) {
+			from, to = f, t
+			if to.Sub(from) > 30*24*time.Hour {
+				gran = usage.GranMonth
+			}
+		}
+	}
+	if gran == usage.GranMonth {
+		from = time.Date(from.Year(), from.Month(), 1, 0, 0, 0, 0, loc)
+	}
+
+	group := q.Get("group")
+	if group == "" {
+		group = usage.GroupAll
+	}
+	res := s.proxy.Usage().Query(usage.Query{
+		From: from, To: to, Granularity: gran, Group: group,
+		ProviderID: q.Get("provider"), ModelID: q.Get("model"), Caller: q.Get("caller"),
+	})
+	writeJSON(w, 200, map[string]any{
+		"range": span, "granularity": gran, "group": group,
+		"from": from.Format("2006-01-02"), "to": to.Format("2006-01-02"),
+		"totals": res.Totals,
+		"series": fillSeries(res.Series, res.Groups, from, to, gran),
+		"groups": res.Groups,
+	})
+}
+
+// fillSeries 把没有数据的时段补成 0，并为每个分组各生成一条序列。
+func fillSeries(points []usage.SeriesPoint, groups []usage.GroupRow, from, to time.Time, gran string) []usage.SeriesPoint {
+	byKey := make(map[[2]string]usage.Totals, len(points))
+	for _, p := range points {
+		byKey[[2]string{p.Period, p.Group}] = p.Totals
+	}
+	keys := make([]string, 0, len(groups))
+	for _, g := range groups {
+		keys = append(keys, g.Key)
+	}
+	if len(keys) == 0 {
+		keys = []string{""}
+	}
+	out := []usage.SeriesPoint{}
+	add := func(period string) {
+		for _, k := range keys {
+			out = append(out, usage.SeriesPoint{Period: period, Group: k, Totals: byKey[[2]string{period, k}]})
+		}
+	}
+	switch gran {
+	case usage.GranHour:
+		for h := 0; h < 24; h++ {
+			add(from.Add(time.Duration(h) * time.Hour).Format("2006-01-02T15"))
+		}
+	case usage.GranMonth:
+		for m := from; !m.After(to); m = m.AddDate(0, 1, 0) {
+			add(m.Format("2006-01"))
+		}
+	default:
+		for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
+			add(d.Format("2006-01-02"))
+		}
+	}
+	return out
+}
 
 type authDTO struct {
 	Type         string `json:"type"`

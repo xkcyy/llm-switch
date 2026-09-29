@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { App as AntApp, Badge, Button, Card, Layout, Menu, Skeleton, Space, Tag, Tooltip, Typography } from 'antd'
 import {
   ApiOutlined,
+  BarChartOutlined,
   CloudServerOutlined,
   CodeOutlined,
   DashboardOutlined,
@@ -17,6 +18,7 @@ import CodexPage from './pages/Codex'
 import OpenCodePage from './pages/OpenCode'
 import TraePage from './pages/Trae'
 import SettingsPage from './pages/Settings'
+import Usage from './pages/Usage'
 
 const { Sider, Header, Content } = Layout
 
@@ -26,6 +28,7 @@ const NAV = [
   { key: 'codex', icon: <ApiOutlined />, label: '接入 Codex' },
   { key: 'opencode', icon: <CodeOutlined />, label: '接入 OpenCode' },
   { key: 'trae', icon: <RobotOutlined />, label: '接入 Trae SOLO' },
+  { key: 'usage', icon: <BarChartOutlined />, label: '用量' },
   { key: 'settings', icon: <SettingOutlined />, label: '设置' }
 ]
 
@@ -35,6 +38,7 @@ const TITLES = {
   codex: { title: '接入 Codex', sub: '一键写入配置，之后模型变化自动同步' },
   opencode: { title: '接入 OpenCode', sub: '写入 opencode.json，模型变化自动同步且无需重启' },
   trae: { title: '接入 Trae SOLO', sub: '点一次，让 Trae 的自定义模型与这里保持一致' },
+  usage: { title: '用量', sub: '各供应商、模型与调用方的 token 消耗' },
   settings: { title: '设置', sub: '都有推荐默认值，通常无需改动' }
 }
 
@@ -50,6 +54,7 @@ function Shell() {
     codex: <CodexPage />,
     opencode: <OpenCodePage />,
     trae: <TraePage />,
+    usage: <Usage />,
     settings: <SettingsPage />
   }[page]
 

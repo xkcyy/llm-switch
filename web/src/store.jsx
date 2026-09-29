@@ -178,6 +178,7 @@ export function AppStoreProvider({ children }) {
   })
   const [settings, setSettingsState] = useState({ autoStart: false, openPanelOnStart: true, logLevel: 'info', keepLogDays: 7, configDir: '' })
   const [recent, setRecent] = useState([])
+  const [usage, setUsage] = useState({ total: null, today: null })
   const [repairs, setRepairs] = useState([])
   const [presets, setPresets] = useState(PRESETS)
 
@@ -201,14 +202,15 @@ export function AppStoreProvider({ children }) {
 
   // 逐项加载：单类数据出问题只提示，不影响其他功能可用
   const refresh = async () => {
-    const labels = ['概览', '供应商', 'Codex 配置', '设置', 'OpenCode 配置', 'Trae 状态']
+    const labels = ['概览', '供应商', 'Codex 配置', '设置', 'OpenCode 配置', 'Trae 状态', '用量']
     const results = await Promise.allSettled([
       Api.overview(),
       Api.providers.list(),
       Api.codex.status(),
       Api.settings.get(),
       Api.opencode.status(),
-      Api.trae.status()
+      Api.trae.status(),
+      Api.usage.summary()
     ])
     const failures = []
     const value = (i) => {
@@ -223,6 +225,7 @@ export function AppStoreProvider({ children }) {
     const st = value(3)
     const oc = value(4)
     const tr = value(5)
+    const usg = value(6)
 
     if (ov) {
       setProxyState(ov.proxy)
@@ -233,6 +236,7 @@ export function AppStoreProvider({ children }) {
     if (cx) setCodexState(mapCodex(cx))
     if (oc) setOpenCodeState(mapOpenCode(oc))
     if (tr) setTraeState(mapTrae(tr))
+    if (usg) setUsage(usg)
     if (st) setSettingsState(mapSettings(st))
     if (providerList) {
       const mapped = providerList.map(mapProvider)
@@ -591,6 +595,7 @@ export function AppStoreProvider({ children }) {
     trae,
     settings,
     recent,
+    usage,
     repairs,
     presets,
     refresh,
