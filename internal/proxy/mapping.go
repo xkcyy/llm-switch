@@ -39,16 +39,20 @@ type Index struct {
 	byNameLow map[string]config.Provider
 	models    map[string]map[string]config.Model // 供应商 ID → 模型 ID → 模型
 	plain     map[string][]Match                 // 模型 ID → 多个候选（无前缀匹配）
+
+	// TraceEnabled 表示是否记录入站请求轨迹；随配置变更在重建索引时更新。
+	TraceEnabled bool
 }
 
 func BuildIndex(cfg *config.Config) *Index {
 	ix := &Index{
-		byID:      map[string]config.Provider{},
-		byName:    map[string]config.Provider{},
-		byIDLower: map[string]config.Provider{},
-		byNameLow: map[string]config.Provider{},
-		models:    map[string]map[string]config.Model{},
-		plain:     map[string][]Match{},
+		byID:         map[string]config.Provider{},
+		byName:       map[string]config.Provider{},
+		byIDLower:    map[string]config.Provider{},
+		byNameLow:    map[string]config.Provider{},
+		models:       map[string]map[string]config.Model{},
+		plain:        map[string][]Match{},
+		TraceEnabled: cfg.Settings.TraceEnabled,
 	}
 	for _, p := range cfg.Providers {
 		if !p.Enabled {

@@ -162,6 +162,34 @@ func TestOpenDefaultsOpenCodeAutoSyncWhenMissing(t *testing.T) {
 	}
 }
 
+func TestOpenDefaultsTraceEnabledWhenMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"schema_version":1,"settings":{"proxy":{"host":"127.0.0.1","port":8317}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.Snapshot().Settings.TraceEnabled {
+		t.Fatal("老配置缺少 trace_enabled 字段时应按推荐值开启")
+	}
+	if err := store.Update(func(c *Config) error {
+		c.Settings.TraceEnabled = false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Snapshot().Settings.TraceEnabled {
+		t.Fatal("显式关闭的开关不应被重置为开启")
+	}
+}
+
 func TestProviderProtocolsMigrationAndSanitize(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "config.json"))
 	if err != nil {

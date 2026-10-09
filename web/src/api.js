@@ -46,6 +46,12 @@ export const Api = {
     report: (params = {}) => request(`/api/usage/report?${new URLSearchParams(params)}`)
   },
 
+  trajectory: {
+    list: () => request('/api/trajectory'),
+    detail: (id) => request(`/api/trajectory/${id}`),
+    raw: (id) => request(`/api/trajectory/${id}/raw`)
+  },
+
   providers: {
     list: () => request('/api/providers'),
     presets: () => request('/api/providers/presets'),
@@ -93,6 +99,21 @@ export const Api = {
     sync: () => request('/api/trae/sync', { method: 'POST' }),
     reorder: () => request('/api/trae/reorder', { method: 'POST' }),
     restart: () => request('/api/trae/restart', { method: 'POST' })
+  },
+
+  dsh: {
+    status: () => request('/api/dsh'),
+    setAuto: (enabled) => request('/api/dsh/auto', { method: 'PUT', body: { enabled } }),
+    setProfile: (profile) => request('/api/dsh/profile', { method: 'PUT', body: { profile } }),
+    sync: (body = {}) => request('/api/dsh/sync', { method: 'POST', body }),
+    disconnect: () => request('/api/dsh/disconnect', { method: 'POST' })
+  },
+
+  workbuddy: {
+    status: () => request('/api/workbuddy'),
+    setAuto: (enabled) => request('/api/workbuddy/auto', { method: 'PUT', body: { enabled } }),
+    sync: (body = {}) => request('/api/workbuddy/sync', { method: 'POST', body }),
+    disconnect: () => request('/api/workbuddy/disconnect', { method: 'POST' })
   },
 
   settings: {

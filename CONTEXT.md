@@ -1,6 +1,6 @@
 # LLM Switch
 
-Windows 本机模型代理：把多个供应商的模型统一到一个仅监听本机的代理，并自动维护 Codex / OpenCode / Trae 的接入配置。
+Windows 本机模型代理：把多个供应商的模型统一到一个仅监听本机的代理，并自动维护 Codex / OpenCode / Trae / DeepSeek Harness 的接入配置。
 
 ## Language
 
@@ -46,7 +46,7 @@ _Avoid_: 推理链、CoT、思维过程
 _Avoid_: 插件、适配层、补丁、hack
 
 **接入**:
-把一个 Agent（Codex / OpenCode / Trae）的配置指向本机代理，并在模型或端口变化时保持同步。
+把一个 Agent（Codex / OpenCode / Trae / DeepSeek Harness / WorkBuddy）的配置指向本机代理，并在模型或端口变化时保持同步。
 _Avoid_: 安装、绑定、注册
 
 **会话**:
@@ -54,7 +54,7 @@ _Avoid_: 安装、绑定、注册
 _Avoid_: 对话 ID、thread
 
 **调用方**:
-发起模型调用的 Agent，例如 Codex、OpenCode、Trae。代理依据请求自标识识别，识别不出时记为未知；仅用于用量统计的来源分组。
+发起模型调用的 Agent，例如 Codex、OpenCode、Trae、DeepSeek Harness、WorkBuddy。代理依据请求自标识识别，识别不出时记为未知；仅用于用量统计的来源分组。
 _Avoid_: 客户端、来源、渠道
 
 **用量**:

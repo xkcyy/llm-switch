@@ -1,6 +1,6 @@
 # LLM Switch
 
-Windows 本地模型代理：统一管理多个模型供应商，通过一个仅监听本机的代理向 Codex、OpenCode 提供模型服务，并自动维护它们的配置（Codex：config.toml / auth.json / 模型清单；OpenCode：opencode.json）。
+Windows 本地模型代理：统一管理多个模型供应商，通过一个仅监听本机的代理向 Codex、OpenCode、Trae SOLO、DeepSeek Harness、WorkBuddy 提供模型服务，并自动维护它们的接入配置。
 
 界面按"默认即正确、用户零思考"设计：选预设、粘贴 API Key，其余全部自动完成。
 
@@ -12,6 +12,9 @@ Windows 本地模型代理：统一管理多个模型供应商，通过一个仅
   - 技术方案：[docs/design/LLM-Switch-技术设计方案.md](docs/design/LLM-Switch-技术设计方案.md)
   - 模型元数据来源分析：[docs/design/LLM-Switch-模型元数据来源分析.md](docs/design/LLM-Switch-模型元数据来源分析.md)
   - 开发与调试指南：[docs/design/开发与调试指南.md](docs/design/开发与调试指南.md)
+  - DeepSeek Harness 接入：[docs/design/DSH-接入分析与方案.md](docs/design/DSH-接入分析与方案.md)
+  - WorkBuddy 接入：[docs/design/WorkBuddy-接入分析与方案.md](docs/design/WorkBuddy-接入分析与方案.md)
+  - 自动更新与版本管理：[docs/design/自动更新与版本管理方案.md](docs/design/自动更新与版本管理方案.md)
   - 变更记录：[docs/design/变更记录.md](docs/design/变更记录.md)
 - 交互原型（Ant Design，可独立运行）：[prototype/](prototype/README.md)
 
@@ -27,8 +30,9 @@ Windows 本地模型代理：统一管理多个模型供应商，通过一个仅
 
 ```powershell
 # 一键构建（前端 + 测试 + EXE），产物 dist/LLM-Switch.exe
+# 版本号自动取自 git tag（vX.Y.Z）；-Version 仅用于本地开发构建
 # 发行版使用 -H=windowsgui（Windows GUI 子系统），双击不会出现控制台黑框
-powershell -ExecutionPolicy Bypass -File build.ps1 -Version 0.4.2
+powershell -ExecutionPolicy Bypass -File build.ps1
 
 # 只构建后端（前端已构建过）
 powershell -ExecutionPolicy Bypass -File build.ps1 -SkipUI
@@ -43,6 +47,8 @@ go run ./cmd/llm-switch --no-tray
 .\dist\LLM-Switch.exe --no-tray  # 调试：不启动托盘
 .\dist\LLM-Switch.exe --version
 ```
+
+发行包通过 GitHub Releases 分发，仓库不跟踪 EXE。
 
 启动后：管理界面 `http://127.0.0.1:8318`（自动打开），模型代理 `http://127.0.0.1:8317`，配置目录 `%USERPROFILE%\.llm-switch\`。
 
@@ -61,6 +67,8 @@ internal/
   codex/              config.toml / auth.json / 模型清单生成与写入、断开接入
   opencode/           opencode.json 的 provider.llm-switch 段生成与写入、断开接入
   trae/               Trae SOLO 接入：路径探测、argv.json 调试端口、界面驱动、任务进度
+  dsh/                DeepSeek Harness 接入：cordis.patch.yml 合并、断开接入
+  workbuddy/          WorkBuddy 接入：~/.workbuddy/models.json 合并、断开接入
   config/             config.json 存储（原子写入、启动自愈）
   instance/           单实例互斥体
   logx/               按天滚动日志
@@ -87,7 +95,9 @@ screenshots/          真实数据下的界面截图
 - **Codex 配置**：一键接入、自动同步（默认开启，模型增删/默认模型/端口变更触发）、写入前校验与原子替换、断开接入只移除自己写入的配置；模型的 `input_modalities` 按「图片输入」标记生成，Codex 可粘贴截图。
 - **OpenCode 配置**：只维护 `llm-switch` 一个 provider 段（`opencode.json`），模型键为 `供应商ID/模型ID`（保证代理侧确定性映射、同名模型不歧义）；**形状自适应**——自动跟随现有文件，或在界面强制 V1（OpenCode 1.x 兼容）/ V2（OpenCode 2.x 原生，额外写入 `modelID` 与 `limit.context`）；一键接入、自动同步（模型增删/端口变更触发，且只在已接入时维护，不会自行创建配置文件）、写入前校验与原子替换、断开接入只移除自己写入的配置；切换形状时自动清理另一种形状下的同名残留；支持 `opencode.jsonc` 场景的明确拒绝（不丢注释）与 `OPENCODE_CONFIG` / `XDG_CONFIG_HOME` 路径解析。
 - **Trae SOLO 接入**：页面「一键接入」把 Trae 的自定义模型与本地代理**完全对齐**——模型 ID 即 `供应商ID/模型ID`、请求地址指向本机代理，缺少的补齐、不一致的移除，并在添加时按模型元数据填好 Trae 的**高级配置**（上下文窗口、思考模式、图片输入），结尾复核并如实报告；另有可选的「重新排序」按供应商顺序重建列表（Trae 是「新加排最前」，重建后才能得到稳定顺序，代价是每个模型重跑一次连通性测试）。后端用 Go 内置 CDP 驱动 Trae 自己的设置界面完成注册（对应应用内协议 `chat/add_custom_model`，由服务端注册），**不改 Trae 的数据库与配置**；调试端口通过官方支持的 `argv.json` 写入，Trae 未运行则自动带参数拉起，在运行则引导重启。详见 [Trae-SOLO-接入分析与方案](docs/design/Trae-SOLO-接入分析与方案.md)。
-- **默认值**：首个模型自动成为默认模型；开机启动、启动打开面板、Codex/OpenCode 自动同步默认开启；模型元数据自动打「自动」标签。
+- **DeepSeek Harness 接入**：写入 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`（桌面端 profile `desktop`，Web 为 `web`），只维护 `llm-pi-ai` 条目下 `providers.llm-switch` 一段，模型名用 `供应商ID/模型ID`，协议 `openai-completions` 指向本机代理 `/v1`，上下文窗口、最大输出、图片输入与推理档位按模型元数据写入；YAML 节点级合并保留其它 provider、注释与 `!!js` 表达式；一键接入、自动同步（仅在已接入时维护）、断开接入只移除自己写入的 provider；dsh 下一次请求即生效，无需重启。详见 [DSH-接入分析与方案](docs/design/DSH-接入分析与方案.md)。
+- **WorkBuddy 接入**：写入 `~/.workbuddy/models.json`（支持 `WORKBUDDY_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR` 覆盖），只增删本工具写入的自定义模型，模型名用 `供应商ID/模型ID`，`url` 指向本机代理 `/v1/chat/completions`（`useCustomProtocol: true`），工具调用、图片输入、推理档位、上下文窗口、最大输出按模型元数据写入；数组与 `{ "models": [...] }` 两种文件格式都保留用户条目与 Key 原样；WorkBuddy 监听该文件，下一次请求即生效，无需重启；一键接入、自动同步（仅在已接入时维护）、断开接入只移除自己写入的模型。详见 [WorkBuddy-接入分析与方案](docs/design/WorkBuddy-接入分析与方案.md)。
+- **默认值**：首个模型自动成为默认模型；开机启动、启动打开面板、Codex/OpenCode/dsh/WorkBuddy 自动同步默认开启；模型元数据自动打「自动」标签。
 - **运行形态**：系统托盘、开机启动、单实例、日志滚动、管理页令牌与 Host 校验。
 
 ## 验证情况
@@ -108,3 +118,5 @@ screenshots/          真实数据下的界面截图
 - 真实供应商账号下的端到端调用（各供应商协议差异）。
 - 管理面令牌目前通过页面注入；如需更高安全性可改为独立登录。
 - Trae SOLO 目前只做「手动一键接入/断开」，不做自动同步；`tools/trae-solo/` 下的 Python 脚本保留作为排错参照。
+- DeepSeek Harness 桌面端：真实端到端调用、图片输入、热同步与模型页并发写需真机复核（见 [DSH-接入分析与方案](docs/design/DSH-接入分析与方案.md) 第 6 节）。
+- WorkBuddy：真实端到端调用、图片输入、热同步与模型设置页并发写需真机复核（见 [WorkBuddy-接入分析与方案](docs/design/WorkBuddy-接入分析与方案.md) 第 5 节）。

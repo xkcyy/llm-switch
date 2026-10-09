@@ -12,6 +12,7 @@ import (
 	"llm-switch/internal/autostart"
 	"llm-switch/internal/codex"
 	"llm-switch/internal/config"
+	"llm-switch/internal/dsh"
 	"llm-switch/internal/logx"
 	"llm-switch/internal/metadata"
 	"llm-switch/internal/opencode"
@@ -19,17 +20,20 @@ import (
 	"llm-switch/internal/proxy"
 	"llm-switch/internal/trae"
 	"llm-switch/internal/winutil"
+	"llm-switch/internal/workbuddy"
 )
 
 type App struct {
-	Store    *config.Store
-	Index    *proxy.Holder
-	Proxy    *proxy.Server
-	Codex    *codex.Service
-	OpenCode *opencode.Service
-	Trae     *trae.Service
-	Admin    *admin.Server
-	LogDir   string
+	Store     *config.Store
+	Index     *proxy.Holder
+	Proxy     *proxy.Server
+	Codex     *codex.Service
+	OpenCode  *opencode.Service
+	Trae      *trae.Service
+	Dsh       *dsh.Service
+	WorkBuddy *workbuddy.Service
+	Admin     *admin.Server
+	LogDir    string
 
 	syncMu    sync.Mutex
 	syncTimer *time.Timer
@@ -62,9 +66,11 @@ func New(webFS fs.FS) (*App, error) {
 	cx := codex.NewService(store)
 	oc := opencode.NewService(store)
 	tr := trae.NewService(store)
+	ds := dsh.NewService(store)
+	wb := workbuddy.NewService(store)
 
-	a := &App{Store: store, Index: index, Proxy: px, Codex: cx, OpenCode: oc, Trae: tr, LogDir: logDir}
-	a.Admin = admin.New(store, provSvc, px, cx, oc, tr, webFS, logDir, autostart.Set)
+	a := &App{Store: store, Index: index, Proxy: px, Codex: cx, OpenCode: oc, Trae: tr, Dsh: ds, WorkBuddy: wb, LogDir: logDir}
+	a.Admin = admin.New(store, provSvc, px, cx, oc, tr, ds, wb, webFS, logDir, autostart.Set)
 	store.Subscribe(a.onConfigChanged)
 	return a, nil
 }
@@ -72,7 +78,7 @@ func New(webFS fs.FS) (*App, error) {
 func (a *App) onConfigChanged() {
 	cfg := a.Store.Snapshot()
 	a.Index.Store(proxy.BuildIndex(&cfg))
-	if cfg.Settings.CodexAutoSync || cfg.Settings.OpenCodeAutoSync {
+	if cfg.Settings.CodexAutoSync || cfg.Settings.OpenCodeAutoSync || cfg.Settings.DshAutoSync || cfg.Settings.WorkBuddyAutoSync {
 		a.scheduleSync()
 	}
 }
@@ -105,6 +111,28 @@ func (a *App) scheduleSync() {
 				slog.Error("OpenCode 自动同步：写入失败", "error", err)
 			} else {
 				slog.Info("OpenCode 配置已自动同步", "models", len(plan.Models), "base_url", plan.BaseURL)
+			}
+		}
+		if cfg.Settings.DshAutoSync && a.Dsh.Connected(cfg.Settings.DshProfile) {
+			// 只维护已接入的配置，不会自行创建 dsh profile
+			plan, err := a.Dsh.BuildPlan(dsh.Overrides{})
+			if err != nil {
+				slog.Error("dsh 自动同步：生成计划失败", "error", err)
+			} else if err := a.Dsh.Apply(plan); err != nil {
+				slog.Error("dsh 自动同步：写入失败", "error", err)
+			} else {
+				slog.Info("dsh 配置已自动同步", "models", len(plan.Models), "profile", plan.Profile, "base_url", plan.BaseURL)
+			}
+		}
+		if cfg.Settings.WorkBuddyAutoSync && a.WorkBuddy.Connected() {
+			// 只维护已接入的配置，不会自行创建 models.json
+			plan, err := a.WorkBuddy.BuildPlan(workbuddy.Overrides{})
+			if err != nil {
+				slog.Error("WorkBuddy 自动同步：生成计划失败", "error", err)
+			} else if err := a.WorkBuddy.Apply(plan); err != nil {
+				slog.Error("WorkBuddy 自动同步：写入失败", "error", err)
+			} else {
+				slog.Info("WorkBuddy 配置已自动同步", "models", len(plan.Models), "base_url", plan.BaseURL)
 			}
 		}
 	})

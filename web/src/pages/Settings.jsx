@@ -120,6 +120,11 @@ export default function SettingsPage() {
             </Button>
           }
         />
+        <RowItem
+          title="记录请求轨迹"
+          desc="在「请求轨迹」页回看最近 50 条入站请求；仅存内存，重启即丢"
+          control={<Switch checked={s.traceEnabled !== false} onChange={(v) => update({ traceEnabled: v })} />}
+        />
       </Card>
 
       <Card className="soft-card" variant="borderless" title="配置与数据">

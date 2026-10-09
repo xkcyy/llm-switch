@@ -43,6 +43,16 @@ func chatDecodeRequest(body []byte) (*irRequest, error) {
 		case "tool":
 			req.Items = append(req.Items, irItem{Kind: irCallOutput, CallID: m.ToolCallID, Output: contentString(m.Content)})
 		case "assistant":
+			reasoning := ""
+			if m.ReasoningContent != nil {
+				reasoning = *m.ReasoningContent
+			}
+			if reasoning == "" {
+				reasoning = m.Reasoning
+			}
+			if reasoning != "" {
+				req.Items = append(req.Items, irItem{Kind: "reasoning", Text: reasoning})
+			}
 			if text, images := splitChatContent(m.Content); text != "" || len(images) > 0 {
 				req.Items = append(req.Items, irItem{Kind: irMessage, Role: "assistant", Text: text, Images: images})
 			}

@@ -252,3 +252,186 @@ body {
 .ant-card {
   border-radius: 12px;
 }
+
+/* ---- 请求轨迹 ---- */
+
+.trace-pre {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: #f6f8fc;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 固定高度的滚动区：长内容在内部滚动，页面不再被拉长 */
+.trace-scroll {
+  max-height: calc(100vh - 320px);
+  min-height: 200px;
+  overflow: auto;
+}
+
+/* 左密集列表 + 右检查器，两栏各自滚动 */
+.trace-split {
+  display: flex;
+  gap: 12px;
+  height: calc(100vh - 320px);
+  min-height: 320px;
+}
+
+.trace-list-pane {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.trace-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+}
+
+.trace-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  border-left: 3px solid transparent;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.trace-item:hover {
+  background: #f6f8fc;
+}
+
+.trace-item.active {
+  background: #eef4ff;
+}
+
+.trace-item .ant-tag {
+  margin-inline-end: 0;
+  flex: 0 0 auto;
+}
+
+.trace-item-title {
+  flex: 0 1 auto;
+  max-width: 38%;
+  color: #4a5268;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-item-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #8c93a4;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-detail {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.trace-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.trace-sub {
+  margin-top: 6px;
+}
+
+.trace-tool {
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  padding: 1px 8px;
+}
+
+.trace-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 24px;
+  cursor: pointer;
+}
+
+.trace-tool-caret {
+  color: #8c93a4;
+  font-size: 10px;
+  flex: 0 0 auto;
+}
+
+.trace-tool-head .ant-typography {
+  flex: 0 0 auto;
+}
+
+.trace-tool-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #8c93a4;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-tool-body {
+  padding-bottom: 6px;
+}
+
+/* 原始请求弹窗：方法/地址/请求头/请求体统一在一个滚动区里 */
+.trace-raw {
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.trace-raw-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.trace-raw-line .ant-tag {
+  margin-inline-end: 0;
+}
+
+.trace-raw-url {
+  word-break: break-all;
+}
+
+.trace-raw-headers {
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  background: #fafbfd;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  word-break: break-all;
+}
+
+.trace-raw-hname {
+  color: #4a5268;
+}

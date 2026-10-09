@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"llm-switch/internal/config"
 	"llm-switch/internal/proxy/protocol"
 	"llm-switch/internal/proxy/protocol/compat"
+	"llm-switch/internal/trace"
 	"llm-switch/internal/upstream"
 	"llm-switch/internal/usage"
 )
@@ -45,12 +47,14 @@ type Record struct {
 	Warnings     []string  `json:"warnings,omitempty"`
 }
 
-// sourceOf 依据 User-Agent 粗略识别调用方（Codex / OpenCode / 其它），仅用于界面展示。
+// sourceOf 依据 User-Agent 粗略识别调用方（Codex / OpenCode / WorkBuddy / 其它），仅用于界面展示。
 func sourceOf(r *http.Request) string {
 	ua := strings.ToLower(r.Header.Get("User-Agent"))
 	switch {
 	case strings.Contains(ua, "opencode"):
 		return "OpenCode"
+	case strings.Contains(ua, "workbuddy") || strings.Contains(ua, "codebuddy"):
+		return "WorkBuddy"
 	case strings.Contains(ua, "codex"):
 		return "Codex"
 	case ua == "":
@@ -74,6 +78,7 @@ type Server struct {
 	records []Record
 
 	usageStore *usage.Store
+	traces     *trace.Store
 }
 
 func NewServer(store *config.Store, index *Holder) *Server {
@@ -97,11 +102,15 @@ func NewServer(store *config.Store, index *Holder) *Server {
 		index:      index,
 		client:     &http.Client{Transport: transport},
 		usageStore: usageStore,
+		traces:     trace.NewStore(),
 	}
 }
 
 // Usage 返回用量统计存储，供管理面查询。
 func (s *Server) Usage() *usage.Store { return s.usageStore }
+
+// Traces 返回入站请求轨迹存储，供管理面查询。
+func (s *Server) Traces() *trace.Store { return s.traces }
 
 // Close 落盘用量统计，进程退出前调用。
 func (s *Server) Close() error { return s.usageStore.Close() }
@@ -280,7 +289,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 		protocol.WriteError(w, entry, 400, "缺少模型名称")
 		return
 	}
-	match, err := s.index.Load().Resolve(head.Model)
+	idx := s.index.Load()
+	match, err := idx.Resolve(head.Model)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrModelNotFound) {
@@ -294,6 +304,18 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	rec.Provider = match.Provider.Name
 	rec.Model = match.Model.ID
 	rec.Session = sessionID(r, body, match.Model.ID)
+
+	// 轨迹采集：旁路复制原始入站请求体，点开即可回看完整执行链路。不改变转发行为。
+	if idx.TraceEnabled {
+		traceID := s.traces.Add(trace.Entry{
+			Time: start, Source: rec.Source, Session: rec.Session, Protocol: string(entry),
+			RequestModel: head.Model, Provider: match.Provider.Name, Model: match.Model.ID,
+			Bytes: len(body), Body: append([]byte(nil), body...),
+			Method: r.Method, URL: "http://" + r.Host + r.URL.RequestURI(), Proto: r.Proto,
+			Headers: captureHeaders(r.Header),
+		})
+		defer func() { s.traces.Complete(traceID, rec.Status, time.Since(start).Milliseconds()) }()
+	}
 
 	up, err := match.UpstreamProtocol(entry)
 	if err != nil {
@@ -542,6 +564,36 @@ func extractText(raw json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+// captureHeaders 复制请求头并按名称排序，供「原始请求」视图展示；认证类头的值会被脱敏。
+func captureHeaders(h http.Header) []trace.Header {
+	names := make([]string, 0, len(h))
+	for k := range h {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	out := make([]trace.Header, 0, len(names))
+	for _, k := range names {
+		for _, v := range h.Values(k) {
+			if sensitiveHeader(k) {
+				v = "***"
+			}
+			out = append(out, trace.Header{Name: k, Value: v})
+		}
+	}
+	return out
+}
+
+func sensitiveHeader(name string) bool {
+	l := strings.ToLower(name)
+	switch {
+	case l == "authorization", l == "proxy-authorization", l == "cookie", l == "set-cookie":
+		return true
+	case strings.Contains(l, "api-key"), strings.Contains(l, "apikey"), strings.Contains(l, "token"):
+		return true
+	}
+	return false
 }
 
 func isLoopback(remoteAddr string) bool {

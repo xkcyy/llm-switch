@@ -30,6 +30,10 @@ type Settings struct {
 	CodexAutoSync      bool        `json:"codex_auto_sync"`
 	OpenCodeAutoSync   bool        `json:"opencode_auto_sync"`
 	OpenCodeShape      string      `json:"opencode_shape"` // auto | v1 | v2
+	DshAutoSync        bool        `json:"dsh_auto_sync"`
+	DshProfile         string      `json:"dsh_profile"` // desktop | web
+	WorkBuddyAutoSync  bool        `json:"workbuddy_auto_sync"`
+	TraceEnabled       bool        `json:"trace_enabled"` // 记录入站请求轨迹（仅内存）
 }
 
 type Endpoint struct {
@@ -302,6 +306,10 @@ func Default() Config {
 			CodexAutoSync:      true,
 			OpenCodeAutoSync:   true,
 			OpenCodeShape:      "auto",
+			DshAutoSync:        true,
+			DshProfile:         "desktop",
+			WorkBuddyAutoSync:  true,
+			TraceEnabled:       true,
 		},
 		Providers: []Provider{},
 		Models:    []Model{},
@@ -343,6 +351,15 @@ func Open(path string) (*Store, error) {
 		if json.Unmarshal(b, &probe) == nil {
 			if _, ok := probe.Settings["opencode_auto_sync"]; !ok {
 				s.cfg.Settings.OpenCodeAutoSync = true
+			}
+			if _, ok := probe.Settings["dsh_auto_sync"]; !ok {
+				s.cfg.Settings.DshAutoSync = true
+			}
+			if _, ok := probe.Settings["workbuddy_auto_sync"]; !ok {
+				s.cfg.Settings.WorkBuddyAutoSync = true
+			}
+			if _, ok := probe.Settings["trace_enabled"]; !ok {
+				s.cfg.Settings.TraceEnabled = true
 			}
 		}
 		s.cfg.normalize()
@@ -419,6 +436,9 @@ func (c *Config) normalize() {
 		c.Settings.OpenCodeShape = strings.ToLower(strings.TrimSpace(c.Settings.OpenCodeShape))
 	default:
 		c.Settings.OpenCodeShape = "auto"
+	}
+	if strings.TrimSpace(c.Settings.DshProfile) == "" {
+		c.Settings.DshProfile = "desktop"
 	}
 	if c.Providers == nil {
 		c.Providers = []Provider{}

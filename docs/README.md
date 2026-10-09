@@ -22,6 +22,9 @@
 | [模型元数据来源分析.md](design/LLM-Switch-模型元数据来源分析.md) | 上下文窗口与推理档位的互联网来源、匹配与缓存策略 |
 | [开发与调试指南.md](design/开发与调试指南.md) | 代码结构、构建、运行参数、本地联调、测试、发布检查 |
 | [Trae-SOLO-接入分析与方案.md](design/Trae-SOLO-接入分析与方案.md) | Trae SOLO 一键接入的可行性分析、真机验证记录、Go 内置 CDP 实现与调试脚本 |
+| [DSH-接入分析与方案.md](design/DSH-接入分析与方案.md) | DeepSeek Harness 接入的可行性分析、cordis.patch.yml 合并方案与待验证项 |
+| [WorkBuddy-接入分析与方案.md](design/WorkBuddy-接入分析与方案.md) | WorkBuddy 接入的可行性分析、`~/.workbuddy/models.json` 合并方案与待验证项 |
+| [自动更新与版本管理方案.md](design/自动更新与版本管理方案.md) | EXE 自更新流程、更新源、接口与界面设计，以及版本号规范与发版校验 |
 | [变更记录.md](design/变更记录.md) | 按主题记录的演进历史与文档版本对应 |
 
 ## 按场景查找
@@ -34,6 +37,9 @@
 | 接入新供应商（含预置地址） | [使用指南.md](使用指南.md) §2；[技术设计方案](design/LLM-Switch-技术设计方案.md) §6.1 |
 | 了解产品范围与验收标准 | [产品需求与功能规划](design/LLM-Switch-产品需求与功能规划.md) §3、§10 |
 | 参与开发或排查问题 | [开发与调试指南](design/开发与调试指南.md) |
+| 接入 DeepSeek Harness | [DSH-接入分析与方案](design/DSH-接入分析与方案.md) |
+| 接入 WorkBuddy | [WorkBuddy-接入分析与方案](design/WorkBuddy-接入分析与方案.md) |
+| 了解更新机制与发版规则 | [自动更新与版本管理方案](design/自动更新与版本管理方案.md) |
 | 看某个功能什么时候做的 | [变更记录](design/变更记录.md) |
 
 ## 仓库其他位置

@@ -524,6 +524,7 @@ export default function Providers() {
                   {
                     title: '操作',
                     width: 88,
+                    fixed: 'right',
                     render: (_, r) => (
                       <Space size={0}>
                         <Tooltip title="发送一次最小请求验证可用">

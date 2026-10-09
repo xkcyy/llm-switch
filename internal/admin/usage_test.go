@@ -11,15 +11,19 @@ import (
 
 	"llm-switch/internal/codex"
 	"llm-switch/internal/config"
+	"llm-switch/internal/dsh"
 	"llm-switch/internal/opencode"
 	"llm-switch/internal/provider"
 	"llm-switch/internal/proxy"
 	"llm-switch/internal/trae"
 	"llm-switch/internal/usage"
+	"llm-switch/internal/workbuddy"
 )
 
 func newUsageServer(t *testing.T) (*http.ServeMux, *usage.Store) {
 	t.Helper()
+	t.Setenv("DSH_HOME", t.TempDir())
+	t.Setenv("WORKBUDDY_CONFIG_DIR", t.TempDir())
 	store, err := config.Open(filepath.Join(t.TempDir(), "config.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +32,8 @@ func newUsageServer(t *testing.T) (*http.ServeMux, *usage.Store) {
 	index.Store(proxy.BuildIndex(&config.Config{}))
 	px := proxy.NewServer(store, index)
 	svc := New(store, provider.NewService(store, nil), px,
-		codex.NewService(store), opencode.NewService(store), trae.NewService(store),
+		codex.NewService(store), opencode.NewService(store), trae.NewService(store), dsh.NewService(store),
+		workbuddy.NewService(store),
 		fstest.MapFS{}, t.TempDir(), nil)
 	mux := http.NewServeMux()
 	svc.registerAPI(mux)

@@ -85,6 +85,89 @@ func TestProxyModelProtocolOverride(t *testing.T) {
 	}
 }
 
+// 入站请求应被旁路记录为轨迹：元数据齐全、状态回填、原始请求体保留。
+func TestProxyRecordsTrace(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	ts, srv := newTestProxyServer(t, upstream.URL, nil)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/responses",
+		strings.NewReader(`{"model":"deepseek/deepseek-chat","input":"hello","stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-secret")
+	req.Header.Set("session_id", "sess-trace")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	list := srv.Traces().List()
+	if len(list) != 1 {
+		t.Fatalf("轨迹未记录: %d", len(list))
+	}
+	got := list[0]
+	if got.Protocol != "responses" || got.RequestModel != "deepseek/deepseek-chat" {
+		t.Fatalf("轨迹元数据不对: %+v", got)
+	}
+	if got.Status != 200 {
+		t.Fatalf("轨迹状态未回填: %d", got.Status)
+	}
+	if got.Method != "POST" || !strings.Contains(got.URL, "/v1/responses") {
+		t.Fatalf("轨迹未记录方法与地址: %s %s", got.Method, got.URL)
+	}
+	if got.Session != "sess-trace" {
+		t.Fatalf("轨迹未记录会话: %q", got.Session)
+	}
+	var auth, session string
+	for _, h := range got.Headers {
+		switch h.Name {
+		case "Authorization":
+			auth = h.Value
+		case "Session_id":
+			session = h.Value
+		}
+	}
+	if auth != "***" {
+		t.Fatalf("Authorization 未脱敏: %q", auth)
+	}
+	if session != "sess-trace" {
+		t.Fatalf("普通请求头未保留: %q", session)
+	}
+	if got.Bytes == 0 {
+		t.Fatalf("轨迹未记录请求体大小")
+	}
+	if !strings.Contains(string(got.Body), "hello") {
+		t.Fatalf("轨迹未保存原始请求体")
+	}
+}
+
+// 关闭轨迹开关后不应记录入站请求。
+func TestProxyTraceDisabled(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	ts, srv := newTestProxyServer(t, upstream.URL, func(c *config.Config) { c.Settings.TraceEnabled = false })
+	resp, err := http.Post(ts.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"deepseek/deepseek-chat","input":"hi","stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(srv.Traces().List()) != 0 {
+		t.Fatal("关闭开关后不应记录轨迹")
+	}
+}
+
 func TestProxyForwardsSessionAndUserAgent(t *testing.T) {
 	var gotSession, gotUA string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

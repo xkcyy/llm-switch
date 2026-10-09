@@ -21,12 +21,16 @@ import (
 	"llm-switch/internal/buildinfo"
 	"llm-switch/internal/codex"
 	"llm-switch/internal/config"
+	"llm-switch/internal/dsh"
 	"llm-switch/internal/opencode"
 	"llm-switch/internal/provider"
 	"llm-switch/internal/proxy"
+	"llm-switch/internal/proxy/protocol"
+	"llm-switch/internal/trace"
 	"llm-switch/internal/trae"
 	"llm-switch/internal/usage"
 	"llm-switch/internal/winutil"
+	"llm-switch/internal/workbuddy"
 )
 
 type Server struct {
@@ -36,6 +40,8 @@ type Server struct {
 	codex     *codex.Service
 	opencode  *opencode.Service
 	trae      *trae.Service
+	dsh       *dsh.Service
+	workbuddy *workbuddy.Service
 	token     string
 	webFS     fs.FS
 
@@ -47,9 +53,9 @@ type Server struct {
 	running bool
 }
 
-func New(store *config.Store, prov *provider.Service, px *proxy.Server, cx *codex.Service, oc *opencode.Service, tr *trae.Service, webFS fs.FS, logDir string, onAutoStart func(bool) error) *Server {
+func New(store *config.Store, prov *provider.Service, px *proxy.Server, cx *codex.Service, oc *opencode.Service, tr *trae.Service, ds *dsh.Service, wb *workbuddy.Service, webFS fs.FS, logDir string, onAutoStart func(bool) error) *Server {
 	return &Server{
-		store: store, providers: prov, proxy: px, codex: cx, opencode: oc, trae: tr,
+		store: store, providers: prov, proxy: px, codex: cx, opencode: oc, trae: tr, dsh: ds, workbuddy: wb,
 		token: randomToken(), webFS: webFS, logDir: logDir, onAutoStart: onAutoStart,
 	}
 }
@@ -150,6 +156,10 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/usage", s.handleUsage)
 	mux.HandleFunc("GET /api/usage/report", s.handleUsageReport)
 
+	mux.HandleFunc("GET /api/trajectory", s.handleTrajectoryList)
+	mux.HandleFunc("GET /api/trajectory/{id}", s.handleTrajectoryDetail)
+	mux.HandleFunc("GET /api/trajectory/{id}/raw", s.handleTrajectoryRaw)
+
 	mux.HandleFunc("GET /api/providers", s.handleProviderList)
 	mux.HandleFunc("POST /api/providers", s.handleProviderCreate)
 	mux.HandleFunc("GET /api/providers/presets", s.handlePresets)
@@ -187,6 +197,17 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/trae/reorder", s.handleTraeReorder)
 	mux.HandleFunc("POST /api/trae/restart", s.handleTraeRestart)
 
+	mux.HandleFunc("GET /api/dsh", s.handleDshStatus)
+	mux.HandleFunc("PUT /api/dsh/auto", s.handleDshAuto)
+	mux.HandleFunc("PUT /api/dsh/profile", s.handleDshProfile)
+	mux.HandleFunc("POST /api/dsh/sync", s.handleDshSync)
+	mux.HandleFunc("POST /api/dsh/disconnect", s.handleDshDisconnect)
+
+	mux.HandleFunc("GET /api/workbuddy", s.handleWorkBuddyStatus)
+	mux.HandleFunc("PUT /api/workbuddy/auto", s.handleWorkBuddyAuto)
+	mux.HandleFunc("POST /api/workbuddy/sync", s.handleWorkBuddySync)
+	mux.HandleFunc("POST /api/workbuddy/disconnect", s.handleWorkBuddyDisconnect)
+
 	mux.HandleFunc("GET /api/settings", s.handleSettingsGet)
 	mux.HandleFunc("PUT /api/settings", s.handleSettingsUpdate)
 	mux.HandleFunc("POST /api/system/open-config-dir", s.handleOpenConfigDir)
@@ -211,6 +232,10 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			"connected": s.opencode.Connected(), "auto_sync": cfg.Settings.OpenCodeAutoSync,
 			"config_path": s.opencode.Paths().Config,
 		},
+		"dsh": map[string]any{
+			"connected": s.dsh.Connected(cfg.Settings.DshProfile), "auto_sync": cfg.Settings.DshAutoSync,
+			"profile": cfg.Settings.DshProfile, "config_path": dsh.ResolvePaths(cfg.Settings.DshProfile).Patch,
+		},
 		"default_model":   cfg.Settings.DefaultModel,
 		"recent_requests": s.proxy.Recent(8),
 		"recent_errors":   s.proxy.RecentErrors(5),
@@ -221,6 +246,62 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 // ---- 供应商 ----
 
 // ---- 用量 ----
+
+// ---- 轨迹 ----
+
+// handleTrajectoryList 返回最近入站推理请求的摘要（不含请求体）。
+func (s *Server) handleTrajectoryList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{
+		"capacity": trace.Capacity,
+		"requests": s.proxy.Traces().List(),
+	})
+}
+
+// handleTrajectoryDetail 返回单条请求解析后的轨迹文档（系统提示词、工具、历史行）。
+func (s *Server) handleTrajectoryDetail(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求 ID 无效"})
+		return
+	}
+	entry, ok := s.proxy.Traces().Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "轨迹记录不存在或已被覆盖"})
+		return
+	}
+	resp := map[string]any{"entry": entry}
+	p, err := protocol.Parse(entry.Protocol)
+	if err != nil {
+		resp["error"] = "未知入口协议：" + entry.Protocol
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	doc, err := protocol.TraceRequest(p, entry.Body)
+	if err != nil {
+		resp["error"] = err.Error()
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	resp["document"] = doc
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTrajectoryRaw 返回单条请求的原始入站请求体。
+func (s *Server) handleTrajectoryRaw(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求 ID 无效"})
+		return
+	}
+	entry, ok := s.proxy.Traces().Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "轨迹记录不存在或已被覆盖"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entry": entry, "headers": entry.Headers, "body": string(entry.Body),
+	})
+}
 
 // handleUsage 返回累计与今日的用量合计。时间粒度与分组查询在后续迭代补齐。
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
@@ -840,6 +921,151 @@ func (s *Server) handleTraeRestart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "message": "Trae 已重启，调试端口就绪"})
 }
 
+// ---- DeepSeek Harness (dsh) ----
+
+func (s *Server) handleDshStatus(w http.ResponseWriter, r *http.Request) {
+	st, err := s.dsh.Status()
+	if err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, st)
+}
+
+func (s *Server) handleDshAuto(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readJSON(r, &in); err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	if err := s.store.Update(func(c *config.Config) error {
+		c.Settings.DshAutoSync = in.Enabled
+		return nil
+	}); err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"auto_sync": in.Enabled})
+}
+
+// handleDshProfile 设置写入哪个 dsh profile：desktop（桌面端）或 web。
+func (s *Server) handleDshProfile(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Profile string `json:"profile"`
+	}
+	if err := readJSON(r, &in); err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	profile := strings.TrimSpace(in.Profile)
+	if profile == "" {
+		apiErr(w, 400, "profile 不能为空")
+		return
+	}
+	if err := s.store.Update(func(c *config.Config) error {
+		c.Settings.DshProfile = profile
+		return nil
+	}); err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"profile": profile})
+}
+
+func (s *Server) handleDshSync(w http.ResponseWriter, r *http.Request) {
+	var ov dsh.Overrides
+	if err := readJSON(r, &ov); err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	plan, err := s.dsh.BuildPlan(ov)
+	if err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	if err := s.dsh.Apply(plan); err != nil {
+		apiErr(w, 500, err.Error())
+		return
+	}
+	if strings.TrimSpace(ov.Profile) != "" {
+		s.store.Update(func(c *config.Config) error {
+			c.Settings.DshProfile = plan.Profile
+			return nil
+		})
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "message": "已同步到 DeepSeek Harness 配置",
+		"models": len(plan.Models), "path": plan.Path, "profile": plan.Profile, "warnings": plan.Warnings,
+	})
+}
+
+func (s *Server) handleDshDisconnect(w http.ResponseWriter, r *http.Request) {
+	cfg := s.store.Snapshot()
+	if err := s.dsh.Disconnect(cfg.Settings.DshProfile); err != nil {
+		apiErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "message": "已断开 DeepSeek Harness 接入"})
+}
+
+func (s *Server) handleWorkBuddyStatus(w http.ResponseWriter, r *http.Request) {
+	st, err := s.workbuddy.Status()
+	if err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, st)
+}
+
+func (s *Server) handleWorkBuddyAuto(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readJSON(r, &in); err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	if err := s.store.Update(func(c *config.Config) error {
+		c.Settings.WorkBuddyAutoSync = in.Enabled
+		return nil
+	}); err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"auto_sync": in.Enabled})
+}
+
+func (s *Server) handleWorkBuddySync(w http.ResponseWriter, r *http.Request) {
+	var ov workbuddy.Overrides
+	if err := readJSON(r, &ov); err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	plan, err := s.workbuddy.BuildPlan(ov)
+	if err != nil {
+		apiErr(w, 400, err.Error())
+		return
+	}
+	if err := s.workbuddy.Apply(plan); err != nil {
+		apiErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "message": "已同步到 WorkBuddy 自定义模型",
+		"models": len(plan.Models), "path": plan.Path, "warnings": plan.Warnings,
+	})
+}
+
+func (s *Server) handleWorkBuddyDisconnect(w http.ResponseWriter, r *http.Request) {
+	if err := s.workbuddy.Disconnect(); err != nil {
+		apiErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "message": "已断开 WorkBuddy 接入"})
+}
+
 // ---- 设置 ----
 
 func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
@@ -862,6 +1088,7 @@ func (s *Server) handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 		OpenBrowserOnStart *bool               `json:"open_browser_on_start"`
 		AutoStart          *bool               `json:"auto_start"`
 		DefaultModel       *string             `json:"default_model"`
+		TraceEnabled       *bool               `json:"trace_enabled"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		apiErr(w, 400, err.Error())
@@ -892,6 +1119,9 @@ func (s *Server) handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.DefaultModel != nil {
 			c.Settings.DefaultModel = *in.DefaultModel
+		}
+		if in.TraceEnabled != nil {
+			c.Settings.TraceEnabled = *in.TraceEnabled
 		}
 		return nil
 	})

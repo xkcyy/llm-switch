@@ -48,6 +48,7 @@ const mapSettings = (data) => ({
   openPanelOnStart: data.settings.open_browser_on_start,
   logLevel: data.settings.log?.level || 'info',
   keepLogDays: data.settings.log?.retention_days || 7,
+  traceEnabled: data.settings.trace_enabled !== false,
   version: data.version || '',
   configDir: data.paths?.config_dir || '',
   logDir: data.paths?.log_dir || '',
@@ -115,6 +116,40 @@ const mapTrae = (t) => ({
   job: t.job ? mapTraeJob(t.job) : null
 })
 
+const mapDsh = (d) => ({
+  connected: Boolean(d.connected),
+  autoSync: Boolean(d.auto_sync),
+  profile: d.profile || 'desktop',
+  profileSetting: d.profile_setting || 'desktop',
+  profiles: d.profiles || [],
+  profileExists: Boolean(d.profile_exists),
+  baseUrl: d.base_url || '',
+  providerId: d.provider_id || 'llm-switch',
+  configPath: d.config_path || '',
+  models: d.models || [],
+  otherProviders: d.other_providers || [],
+  files: d.files || {},
+  generated: d.generated || '',
+  warnings: d.warnings || [],
+  lastSync: d.last_sync ? new Date(d.last_sync) : null
+})
+
+const mapWorkBuddy = (w) => ({
+  connected: Boolean(w.connected),
+  autoSync: Boolean(w.auto_sync),
+  installed: Boolean(w.installed),
+  baseUrl: w.base_url || '',
+  chatUrl: w.chat_url || '',
+  configPath: w.config_path || '',
+  format: w.format || 'array',
+  models: w.models || [],
+  otherModels: w.other_models || [],
+  file: w.file || {},
+  generated: w.generated || '',
+  warnings: w.warnings || [],
+  lastSync: w.last_sync ? new Date(w.last_sync) : null
+})
+
 const midLevel = (levels) => levels[Math.floor((levels.length - 1) / 2)] || 'medium'
 
 // mergeCaps 维护模型能力：图片输入即 capabilities 里的 vision，
@@ -176,7 +211,39 @@ export function AppStoreProvider({ children }) {
     models: [],
     job: null
   })
-  const [settings, setSettingsState] = useState({ autoStart: false, openPanelOnStart: true, logLevel: 'info', keepLogDays: 7, configDir: '' })
+  const [dsh, setDshState] = useState({
+    connected: false,
+    autoSync: true,
+    profile: 'desktop',
+    profileSetting: 'desktop',
+    profiles: [],
+    profileExists: false,
+    baseUrl: '',
+    providerId: 'llm-switch',
+    configPath: '',
+    models: [],
+    otherProviders: [],
+    files: {},
+    generated: '',
+    warnings: [],
+    lastSync: null
+  })
+  const [workbuddy, setWorkBuddyState] = useState({
+    connected: false,
+    autoSync: true,
+    installed: false,
+    baseUrl: '',
+    chatUrl: '',
+    configPath: '',
+    format: 'array',
+    models: [],
+    otherModels: [],
+    file: {},
+    generated: '',
+    warnings: [],
+    lastSync: null
+  })
+  const [settings, setSettingsState] = useState({ autoStart: false, openPanelOnStart: true, logLevel: 'info', keepLogDays: 7, traceEnabled: true, configDir: '' })
   const [recent, setRecent] = useState([])
   const [usage, setUsage] = useState({ total: null, today: null })
   const [repairs, setRepairs] = useState([])
@@ -202,7 +269,7 @@ export function AppStoreProvider({ children }) {
 
   // 逐项加载：单类数据出问题只提示，不影响其他功能可用
   const refresh = async () => {
-    const labels = ['概览', '供应商', 'Codex 配置', '设置', 'OpenCode 配置', 'Trae 状态', '用量']
+    const labels = ['概览', '供应商', 'Codex 配置', '设置', 'OpenCode 配置', 'Trae 状态', '用量', 'dsh 配置', 'WorkBuddy 配置']
     const results = await Promise.allSettled([
       Api.overview(),
       Api.providers.list(),
@@ -210,7 +277,9 @@ export function AppStoreProvider({ children }) {
       Api.settings.get(),
       Api.opencode.status(),
       Api.trae.status(),
-      Api.usage.summary()
+      Api.usage.summary(),
+      Api.dsh.status(),
+      Api.workbuddy.status()
     ])
     const failures = []
     const value = (i) => {
@@ -226,6 +295,8 @@ export function AppStoreProvider({ children }) {
     const oc = value(4)
     const tr = value(5)
     const usg = value(6)
+    const ds = value(7)
+    const wb = value(8)
 
     if (ov) {
       setProxyState(ov.proxy)
@@ -236,6 +307,8 @@ export function AppStoreProvider({ children }) {
     if (cx) setCodexState(mapCodex(cx))
     if (oc) setOpenCodeState(mapOpenCode(oc))
     if (tr) setTraeState(mapTrae(tr))
+    if (ds) setDshState(mapDsh(ds))
+    if (wb) setWorkBuddyState(mapWorkBuddy(wb))
     if (usg) setUsage(usg)
     if (st) setSettingsState(mapSettings(st))
     if (providerList) {
@@ -511,6 +584,73 @@ export function AppStoreProvider({ children }) {
         return mapTrae(st)
       },
 
+      async connectDsh() {
+        await Api.dsh.sync({})
+        const st = await Api.dsh.status()
+        setDshState(mapDsh(st))
+        message.success('已接入 DeepSeek Harness')
+      },
+
+      async syncDsh(overrides = {}) {
+        const res = await Api.dsh.sync(overrides)
+        const st = await Api.dsh.status()
+        setDshState(mapDsh(st))
+        if (res?.warnings?.length) message.warning(res.warnings.join('；'), 6)
+        else message.success('配置已同步')
+      },
+
+      async disconnectDsh() {
+        await Api.dsh.disconnect()
+        const st = await Api.dsh.status()
+        setDshState(mapDsh(st))
+        message.success('已断开接入')
+      },
+
+      async setDsh(updater) {
+        const next = typeof updater === 'function' ? updater(dsh) : updater
+        if (next.autoSync !== dsh.autoSync) {
+          await Api.dsh.setAuto(next.autoSync)
+        }
+        setDshState(next)
+      },
+
+      async setDshProfile(profile) {
+        await Api.dsh.setProfile(profile)
+        const st = await Api.dsh.status()
+        setDshState(mapDsh(st))
+        message.success('profile 已更新，可点「重新同步」立即生效')
+      },
+
+      async connectWorkBuddy() {
+        await Api.workbuddy.sync({})
+        const st = await Api.workbuddy.status()
+        setWorkBuddyState(mapWorkBuddy(st))
+        message.success('已接入 WorkBuddy')
+      },
+
+      async syncWorkBuddy(overrides = {}) {
+        const res = await Api.workbuddy.sync(overrides)
+        const st = await Api.workbuddy.status()
+        setWorkBuddyState(mapWorkBuddy(st))
+        if (res?.warnings?.length) message.warning(res.warnings.join('；'), 6)
+        else message.success('配置已同步')
+      },
+
+      async disconnectWorkBuddy() {
+        await Api.workbuddy.disconnect()
+        const st = await Api.workbuddy.status()
+        setWorkBuddyState(mapWorkBuddy(st))
+        message.success('已断开接入')
+      },
+
+      async setWorkBuddy(updater) {
+        const next = typeof updater === 'function' ? updater(workbuddy) : updater
+        if (next.autoSync !== workbuddy.autoSync) {
+          await Api.workbuddy.setAuto(next.autoSync)
+        }
+        setWorkBuddyState(next)
+      },
+
       async setDefaultModel(slug) {
         const res = await Api.settings.update({ default_model: slug })
         if (res.warning) message.warning(res.warning)
@@ -522,6 +662,7 @@ export function AppStoreProvider({ children }) {
         const res = await Api.settings.update({
           auto_start: next.autoStart,
           open_browser_on_start: next.openPanelOnStart,
+          trace_enabled: next.traceEnabled,
           log: { level: next.logLevel, retention_days: next.keepLogDays }
         })
         if (res.warning) message.warning(res.warning)
@@ -579,7 +720,7 @@ export function AppStoreProvider({ children }) {
       }
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [providers, models, proxy, codex, opencode, trae, settings, defaultModel, presets]
+    [providers, models, proxy, codex, opencode, trae, dsh, workbuddy, settings, defaultModel, presets]
   )
 
   const enabledModels = models.filter((m) => m.enabled)
@@ -593,6 +734,8 @@ export function AppStoreProvider({ children }) {
     codex,
     opencode,
     trae,
+    dsh,
+    workbuddy,
     settings,
     recent,
     usage,

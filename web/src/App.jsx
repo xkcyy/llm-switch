@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { App as AntApp, Badge, Button, Card, Layout, Menu, Skeleton, Space, Tag, Tooltip, Typography } from 'antd'
 import {
   ApiOutlined,
@@ -6,19 +6,26 @@ import {
   CloudServerOutlined,
   CodeOutlined,
   DashboardOutlined,
+  DeploymentUnitOutlined,
   FolderOpenOutlined,
+  NodeIndexOutlined,
   ReloadOutlined,
   RobotOutlined,
-  SettingOutlined
+  SettingOutlined,
+  ThunderboltOutlined
 } from '@ant-design/icons'
 import { AppStoreProvider, useApp } from './store'
-import Overview from './pages/Overview'
-import Providers from './pages/Providers'
-import CodexPage from './pages/Codex'
-import OpenCodePage from './pages/OpenCode'
-import TraePage from './pages/Trae'
-import SettingsPage from './pages/Settings'
-import Usage from './pages/Usage'
+
+const Overview = lazy(() => import('./pages/Overview'))
+const Providers = lazy(() => import('./pages/Providers'))
+const CodexPage = lazy(() => import('./pages/Codex'))
+const OpenCodePage = lazy(() => import('./pages/OpenCode'))
+const TraePage = lazy(() => import('./pages/Trae'))
+const DshPage = lazy(() => import('./pages/Dsh'))
+const WorkBuddyPage = lazy(() => import('./pages/WorkBuddy'))
+const SettingsPage = lazy(() => import('./pages/Settings'))
+const Usage = lazy(() => import('./pages/Usage'))
+const Trajectory = lazy(() => import('./pages/Trajectory'))
 
 const { Sider, Header, Content } = Layout
 
@@ -28,7 +35,10 @@ const NAV = [
   { key: 'codex', icon: <ApiOutlined />, label: '接入 Codex' },
   { key: 'opencode', icon: <CodeOutlined />, label: '接入 OpenCode' },
   { key: 'trae', icon: <RobotOutlined />, label: '接入 Trae SOLO' },
+  { key: 'dsh', icon: <DeploymentUnitOutlined />, label: '接入 DeepSeek Harness' },
+  { key: 'workbuddy', icon: <ThunderboltOutlined />, label: '接入 WorkBuddy' },
   { key: 'usage', icon: <BarChartOutlined />, label: '用量' },
+  { key: 'trajectory', icon: <NodeIndexOutlined />, label: '请求轨迹' },
   { key: 'settings', icon: <SettingOutlined />, label: '设置' }
 ]
 
@@ -38,7 +48,10 @@ const TITLES = {
   codex: { title: '接入 Codex', sub: '一键写入配置，之后模型变化自动同步' },
   opencode: { title: '接入 OpenCode', sub: '写入 opencode.json，模型变化自动同步且无需重启' },
   trae: { title: '接入 Trae SOLO', sub: '点一次，让 Trae 的自定义模型与这里保持一致' },
+  dsh: { title: '接入 DeepSeek Harness', sub: '写入 cordis.patch.yml，模型变化自动同步且无需重启' },
+  workbuddy: { title: '接入 WorkBuddy', sub: '写入 ~/.workbuddy/models.json，模型变化自动同步且无需重启' },
   usage: { title: '用量', sub: '各供应商、模型与调用方的 token 消耗' },
+  trajectory: { title: '请求轨迹', sub: '回看最近入站请求的系统提示词、工具与执行链路' },
   settings: { title: '设置', sub: '都有推荐默认值，通常无需改动' }
 }
 
@@ -54,7 +67,10 @@ function Shell() {
     codex: <CodexPage />,
     opencode: <OpenCodePage />,
     trae: <TraePage />,
+    dsh: <DshPage />,
+    workbuddy: <WorkBuddyPage />,
     usage: <Usage />,
+    trajectory: <Trajectory />,
     settings: <SettingsPage />
   }[page]
 
@@ -126,7 +142,15 @@ function Shell() {
         </Header>
         <Content className="app-content">
           {app.ready ? (
-            pageNode
+            <Suspense
+              fallback={
+                <Card className="soft-card" variant="borderless">
+                  <Skeleton active paragraph={{ rows: 6 }} />
+                </Card>
+              }
+            >
+              {pageNode}
+            </Suspense>
           ) : (
             <Card className="soft-card" variant="borderless">
               <Skeleton active paragraph={{ rows: 6 }} />
