@@ -1,0 +1,49 @@
+name: release
+
+# 只由 tag 触发：分支策略不影响发版。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      # fetch-depth: 0 必须保留，否则 tag 不在本地，版本推导失败。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # 构建脚本自带发版闸门：工作区干净、HEAD 在 tag 上、产物内嵌版本等于 tag。
+      - name: Build and package
+        shell: pwsh
+        run: ./build.ps1 -Release
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content -LiteralPath dist/version.txt -Raw).Trim()
+          gh release create "v$version" `
+            dist/LLM-Switch.exe `
+            dist/SHA256SUMS `
+            dist/latest.json `
+            --title "LLM Switch v$version" `
+            --notes-file dist/RELEASE_NOTES.md `
+            --latest
