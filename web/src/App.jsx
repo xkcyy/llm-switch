@@ -1,20 +1,18 @@
-import { lazy, Suspense, useState } from 'react'
-import { App as AntApp, Badge, Button, Card, Layout, Menu, Skeleton, Space, Tag, Tooltip, Typography } from 'antd'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { App as AntApp, Button, Drawer, Layout, Menu, Tooltip } from 'antd'
 import {
   ApiOutlined,
   BarChartOutlined,
   CloudServerOutlined,
-  CodeOutlined,
   DashboardOutlined,
-  DeploymentUnitOutlined,
   FolderOpenOutlined,
+  MenuOutlined,
   NodeIndexOutlined,
   ReloadOutlined,
-  RobotOutlined,
-  SettingOutlined,
-  ThunderboltOutlined
+  SettingOutlined
 } from '@ant-design/icons'
 import { AppStoreProvider, useApp } from './store'
+import { LoadingState } from './components/States'
 
 const Overview = lazy(() => import('./pages/Overview'))
 const Providers = lazy(() => import('./pages/Providers'))
@@ -29,57 +27,132 @@ const Trajectory = lazy(() => import('./pages/Trajectory'))
 
 const { Sider, Header, Content } = Layout
 
-const NAV = [
-  { key: 'overview', icon: <DashboardOutlined />, label: '总览' },
-  { key: 'providers', icon: <CloudServerOutlined />, label: '供应商与模型' },
-  { key: 'codex', icon: <ApiOutlined />, label: '接入 Codex' },
-  { key: 'opencode', icon: <CodeOutlined />, label: '接入 OpenCode' },
-  { key: 'trae', icon: <RobotOutlined />, label: '接入 Trae SOLO' },
-  { key: 'dsh', icon: <DeploymentUnitOutlined />, label: '接入 DeepSeek Harness' },
-  { key: 'workbuddy', icon: <ThunderboltOutlined />, label: '接入 WorkBuddy' },
-  { key: 'usage', icon: <BarChartOutlined />, label: '用量' },
-  { key: 'trajectory', icon: <NodeIndexOutlined />, label: '请求轨迹' },
-  { key: 'settings', icon: <SettingOutlined />, label: '设置' }
+const NAV_GROUPS = [
+  {
+    label: '概览',
+    items: [{ key: 'overview', icon: <DashboardOutlined />, label: '总览' }]
+  },
+  {
+    label: '配置',
+    items: [
+      { key: 'providers', icon: <CloudServerOutlined />, label: '供应商与模型' },
+      { key: 'settings', icon: <SettingOutlined />, label: '设置' }
+    ]
+  },
+  {
+    label: '接入',
+    items: [{ key: 'connect', icon: <ApiOutlined />, label: '接入' }]
+  },
+  {
+    label: '观测',
+    items: [
+      { key: 'usage', icon: <BarChartOutlined />, label: '用量' },
+      { key: 'trajectory', icon: <NodeIndexOutlined />, label: '请求轨迹' }
+    ]
+  }
 ]
 
-const TITLES = {
-  overview: { title: '总览', sub: '一眼确认服务状态与接入进度' },
-  providers: { title: '供应商与模型', sub: '选预设、粘贴 Key，模型信息自动补全' },
-  codex: { title: '接入 Codex', sub: '一键写入配置，之后模型变化自动同步' },
-  opencode: { title: '接入 OpenCode', sub: '写入 opencode.json，模型变化自动同步且无需重启' },
-  trae: { title: '接入 Trae SOLO', sub: '点一次，让 Trae 的自定义模型与这里保持一致' },
-  dsh: { title: '接入 DeepSeek Harness', sub: '写入 cordis.patch.yml，模型变化自动同步且无需重启' },
-  workbuddy: { title: '接入 WorkBuddy', sub: '写入 ~/.workbuddy/models.json，模型变化自动同步且无需重启' },
-  usage: { title: '用量', sub: '各供应商、模型与调用方的 token 消耗' },
-  trajectory: { title: '请求轨迹', sub: '回看最近入站请求的系统提示词、工具与执行链路' },
-  settings: { title: '设置', sub: '都有推荐默认值，通常无需改动' }
+const AGENTS = {
+  codex: { label: 'Codex', page: CodexPage },
+  opencode: { label: 'OpenCode', page: OpenCodePage },
+  trae: { label: 'Trae SOLO', page: TraePage },
+  dsh: { label: 'DeepSeek Harness', page: DshPage },
+  workbuddy: { label: 'WorkBuddy', page: WorkBuddyPage }
+}
+
+function parseRoute() {
+  const raw = window.location.hash.replace(/^#\/?/, '').replace(/\/$/, '')
+  if (!raw) return { page: 'overview', agent: 'codex' }
+  const [page, agent] = raw.split('/')
+  if (page === 'connect') return { page: 'connect', agent: AGENTS[agent] ? agent : 'codex' }
+  return { page, agent: 'codex' }
+}
+
+function routeTitle(route) {
+  if (route.page === 'connect') return `接入 / ${AGENTS[route.agent]?.label || 'Agent'}`
+  const all = NAV_GROUPS.flatMap((group) => group.items)
+  return all.find((item) => item.key === route.page)?.label || '总览'
+}
+
+function navKey(route) {
+  return route.page === 'connect' ? 'connect' : route.page
+}
+
+function RailNav({ route, navigate, collapsed = false }) {
+  return (
+    <div className="rail-nav">
+      {NAV_GROUPS.map((group) => (
+        <div className="nav-group" key={group.label}>
+          {!collapsed ? <div className="nav-group-label">{group.label}</div> : null}
+          <Menu
+            mode="inline"
+            theme="dark"
+            inlineCollapsed={collapsed}
+            selectedKeys={[navKey(route)]}
+            items={group.items}
+            onClick={({ key }) => navigate(key)}
+          />
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function Shell() {
   const app = useApp()
   const { message } = AntApp.useApp()
-  const [page, setPage] = useState('overview')
+  const [route, setRoute] = useState(parseRoute)
   const [restarting, setRestarting] = useState(false)
+  const [collapsed, setCollapsed] = useState(false)
+  const [mobile, setMobile] = useState(() => window.innerWidth < 900)
+  const [navOpen, setNavOpen] = useState(false)
 
-  const pageNode = {
-    overview: <Overview onNavigate={setPage} />,
-    providers: <Providers />,
-    codex: <CodexPage />,
-    opencode: <OpenCodePage />,
-    trae: <TraePage />,
-    dsh: <DshPage />,
-    workbuddy: <WorkBuddyPage />,
-    usage: <Usage />,
-    trajectory: <Trajectory />,
-    settings: <SettingsPage />
-  }[page]
+  useEffect(() => {
+    const onHash = () => setRoute(parseRoute())
+    const onResize = () => {
+      const width = window.innerWidth
+      setMobile(width < 900)
+      setCollapsed(width < 1120)
+    }
+    if (!window.location.hash) window.location.hash = '#/overview'
+    window.addEventListener('hashchange', onHash)
+    window.addEventListener('resize', onResize)
+    onResize()
+    return () => {
+      window.removeEventListener('hashchange', onHash)
+      window.removeEventListener('resize', onResize)
+    }
+  }, [])
+
+  const navigate = (key) => {
+    setNavOpen(false)
+    if (key === 'connect') {
+      const [page, agent] = window.location.hash.replace(/^#\/?/, '').split('/')
+      window.location.hash = page === 'connect' && AGENTS[agent] ? window.location.hash : '#/connect/codex'
+      return
+    }
+    window.location.hash = `#/${key}`
+  }
+
+  const Page = useMemo(() => {
+    if (route.page === 'connect') return AGENTS[route.agent]?.page || CodexPage
+    return (
+      {
+        overview: Overview,
+        providers: Providers,
+        usage: Usage,
+        trajectory: Trajectory,
+        settings: SettingsPage
+      }[route.page] || Overview
+    )
+  }, [route.page, route.agent])
 
   const restartProxy = async () => {
     setRestarting(true)
     try {
       await app.restartProxy()
-    } catch (e) {
-      message.error(e.message)
+    } catch (error) {
+      message.error(error.message)
     } finally {
       setRestarting(false)
     }
@@ -87,77 +160,112 @@ function Shell() {
 
   return (
     <Layout className="app-shell">
-      <Sider width={216} className="app-sider" theme="light">
+      {!mobile ? (
+        <Sider
+          width={248}
+          collapsedWidth={72}
+          collapsed={collapsed}
+          className="app-sider"
+          theme="dark"
+        >
+          <div className="brand">
+            <div className="brand-mark">LS</div>
+            <div className="brand-copy">
+              <div className="brand-name">LLM Switch</div>
+              <div className="brand-sub">本机模型代理</div>
+            </div>
+          </div>
+          <RailNav route={route} navigate={navigate} collapsed={collapsed} />
+          <div className="sider-foot">
+            <button
+              className="sider-action"
+              onClick={async () => {
+                try {
+                  await app.openConfigDir()
+                  message.success('已打开配置目录')
+                } catch (error) {
+                  message.error(error.message)
+                }
+              }}
+            >
+              <FolderOpenOutlined />
+              <span className="sider-action-label">配置目录</span>
+            </button>
+            <button className="sider-action" onClick={() => setCollapsed((value) => !value)}>
+              <ApiOutlined />
+              <span className="sider-action-label">{collapsed ? '展开导航' : '收起导航'}</span>
+            </button>
+            <div className="sider-version">v{app.settings.version || 'dev'} · 本地运行</div>
+          </div>
+        </Sider>
+      ) : null}
+
+      <Layout className="app-main">
+        <Header className="app-header">
+          <div className="topbar-left">
+            {mobile ? (
+              <Button
+                className="topbar-menu"
+                type="text"
+                icon={<MenuOutlined />}
+                onClick={() => setNavOpen(true)}
+                aria-label="打开导航"
+              />
+            ) : null}
+            <span className="breadcrumb-text">LLM Switch / {routeTitle(route)}</span>
+          </div>
+          <div className="topbar-right">
+            <Tooltip title={`代理监听 ${app.proxy.host}:${app.proxy.port}`}>
+              <span className="proxy-status">
+                <span className={`status-dot ${app.proxy.running ? 'is-running' : 'is-stopped'}`} />
+                <span className="proxy-status-text">
+                  {app.proxy.running ? `代理运行中 · ${app.proxy.port}` : '代理已停止'}
+                </span>
+              </span>
+            </Tooltip>
+            <Tooltip title="重启代理">
+              <Button
+                type="text"
+                icon={<ReloadOutlined />}
+                loading={restarting}
+                onClick={restartProxy}
+                aria-label="重启代理"
+              />
+            </Tooltip>
+          </div>
+        </Header>
+
+        <Content className="app-content">
+          <div className="page-wrap">
+            {app.ready ? (
+              <Suspense fallback={<LoadingState rows={8} />}>
+                <Page route={route} navigate={navigate} />
+              </Suspense>
+            ) : (
+              <LoadingState rows={8} />
+            )}
+          </div>
+        </Content>
+      </Layout>
+
+      <Drawer
+        className="mobile-nav"
+        placement="left"
+        width={280}
+        open={navOpen}
+        onClose={() => setNavOpen(false)}
+        closable={false}
+        styles={{ body: { padding: 8 } }}
+      >
         <div className="brand">
           <div className="brand-mark">LS</div>
-          <div>
+          <div className="brand-copy">
             <div className="brand-name">LLM Switch</div>
             <div className="brand-sub">本机模型代理</div>
           </div>
         </div>
-        <Menu
-          mode="inline"
-          selectedKeys={[page]}
-          items={NAV}
-          onClick={(e) => setPage(e.key)}
-          style={{ borderInlineEnd: 'none', padding: '8px 8px' }}
-        />
-        <div className="sider-foot">
-          <Button
-            type="text"
-            block
-            icon={<FolderOpenOutlined />}
-            onClick={async () => {
-              try {
-                await app.openConfigDir()
-                message.success('已打开配置目录')
-              } catch (e) {
-                message.error(e.message)
-              }
-            }}
-          >
-            配置目录
-          </Button>
-          <div className="sider-version">v{app.settings.version || 'dev'} · 本地运行</div>
-        </div>
-      </Sider>
-
-      <Layout>
-        <Header className="app-header">
-          <div className="page-heading">
-            <span className="page-title">{TITLES[page].title}</span>
-            <span className="page-sub">{TITLES[page].sub}</span>
-          </div>
-          <Space size={8}>
-            <Tooltip title={`代理监听 ${app.proxy.host}:${app.proxy.port}，Codex 请求都从这里转发`}>
-              <Tag className="status-tag" color={app.proxy.running ? 'success' : 'default'}>
-                <Badge status={app.proxy.running ? 'processing' : 'default'} />
-                {app.proxy.running ? `代理运行中 · ${app.proxy.port}` : '代理已停止'}
-              </Tag>
-            </Tooltip>
-            <Tooltip title="重启代理">
-              <Button type="text" icon={<ReloadOutlined />} loading={restarting} onClick={restartProxy} />
-            </Tooltip>
-          </Space>
-        </Header>
-        <Content className="app-content">
-          {app.ready ? (
-            <Suspense
-              fallback={
-                <Card className="soft-card" variant="borderless">
-                  <Skeleton active paragraph={{ rows: 6 }} />
-                </Card>
-              }
-            >
-              {pageNode}
-            </Suspense>
-          ) : (
-            <Card className="soft-card" variant="borderless">
-              <Skeleton active paragraph={{ rows: 6 }} />
-            </Card>
-          )}
-        </Content>
-      </Layout>
+        <RailNav route={route} navigate={navigate} />
+      </Drawer>
     </Layout>
   )
 }

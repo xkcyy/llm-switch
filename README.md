@@ -38,8 +38,10 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 powershell -ExecutionPolicy Bypass -File build.ps1 -SkipUI
 
 # 开发模式
-cd web; npm run dev            # 前端开发服务器（需手动指向 8318，或用生产联调）
+# 终端 1：启动管理面（代理 8317 / 管理面 8318）
 go run ./cmd/llm-switch --no-tray
+# 终端 2：前端开发服务器 5199；/api 代理到 8318，并从管理面注入令牌
+cd web; npm run dev
 
 # 运行
 .\dist\LLM-Switch.exe            # 托盘常驻并打开管理页

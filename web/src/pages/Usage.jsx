@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Card, Col, DatePicker, Empty, Row, Segmented, Space, Table, Typography } from 'antd'
+import { DatePicker, Empty, Segmented, Space, Table, Typography } from 'antd'
 import { Api } from '../api'
 import TrendChart, { PALETTE } from '../components/TrendChart'
+import PageHeader from '../components/PageHeader'
+import Panel from '../components/Panel'
+import { EmptyState } from '../components/States'
 import { fmtTokens } from '../format'
 
 const { Text } = Typography
@@ -28,25 +31,13 @@ const METRICS = [
 
 const MAX_SERIES = 8
 
-function Stat({ label, value, extra, accent }) {
-  return (
-    <Card className="soft-card stat-card" variant="borderless">
-      <div className="stat-label" style={{ color: accent }}>{label}</div>
-      <div className="stat-value">{value}</div>
-      <div className="stat-extra">{extra}</div>
-    </Card>
-  )
+function periodLabel(period) {
+  if (period.length === 7) return period
+  if (period.includes('T')) return `${period.slice(11)}:00`
+  return period.slice(5)
 }
 
-// periodLabel 把桶名缩成横轴上的短标签。
-const periodLabel = (p) => {
-  if (p.length === 7) return p
-  if (p.includes('T')) return `${p.slice(11)}:00`
-  return p.slice(5)
-}
-
-// groupLabel 按分组维度挑出主标题与副标题。
-const groupLabel = (row) => {
+function groupLabel(row) {
   if (!row.key) return { main: '合计', sub: '' }
   if (row.model_id) return { main: row.model_name || row.model_id, sub: row.provider_name || row.provider_id }
   if (row.provider_id) return { main: row.provider_name || row.provider_id, sub: '' }
@@ -78,21 +69,20 @@ export default function Usage() {
 
   const totals = data?.totals || {}
   const groups = data?.groups || []
-  const valueOf = (t) => (metric === 'requests' ? t.requests || 0 : t.total_tokens || 0)
-  const formatValue = (v) => (metric === 'requests' ? `${v} 次` : fmtTokens(v))
+  const valueOf = (row) => (metric === 'requests' ? row.requests || 0 : row.total_tokens || 0)
+  const formatValue = (value) => (metric === 'requests' ? `${value} 次` : fmtTokens(value))
 
   const chart = useMemo(() => {
     if (!data?.series?.length) return null
     const periods = []
     const seen = new Set()
-    for (const p of data.series) {
-      if (!seen.has(p.period)) {
-        seen.add(p.period)
-        periods.push(p.period)
+    for (const point of data.series) {
+      if (!seen.has(point.period)) {
+        seen.add(point.period)
+        periods.push(point.period)
       }
     }
-    // 汇总分组在 JSON 里 group 字段会被省略，统一按空串归位，避免取不到数。
-    const lookup = new Map(data.series.map((p) => [`${p.period}\u0000${p.group || ''}`, p]))
+    const lookup = new Map(data.series.map((point) => [`${point.period}\u0000${point.group || ''}`, point]))
     const at = (period, key) => {
       const bucket = lookup.get(`${period}\u0000${key || ''}`)
       return bucket ? valueOf(bucket) : 0
@@ -100,148 +90,162 @@ export default function Usage() {
     const ranked = [...groups].sort((a, b) => valueOf(b) - valueOf(a))
     const head = ranked.slice(0, MAX_SERIES)
     const tail = ranked.slice(MAX_SERIES)
-    const series = head.map((g, i) => ({
-      key: g.key || 'all',
-      name: groupLabel(g).main,
-      color: PALETTE[i % PALETTE.length],
-      points: periods.map((p) => ({ label: periodLabel(p), period: p, value: at(p, g.key) }))
+    const series = head.map((item, index) => ({
+      key: item.key || 'all',
+      name: groupLabel(item).main,
+      color: PALETTE[index % PALETTE.length],
+      points: periods.map((period) => ({ label: periodLabel(period), period, value: at(period, item.key) }))
     }))
     if (tail.length) {
       series.push({
         key: '__other__',
         name: `其它 ${tail.length} 项`,
-        color: '#8c93a4',
-        points: periods.map((p) => ({
-          label: periodLabel(p),
-          period: p,
-          value: tail.reduce((sum, g) => sum + at(p, g.key), 0)
+        color: 'var(--ls-ink-muted)',
+        points: periods.map((period) => ({
+          label: periodLabel(period),
+          period,
+          value: tail.reduce((sum, item) => sum + at(period, item.key), 0)
         }))
       })
     }
     return { periods, series }
   }, [data, metric])
 
-  const peak = groups.reduce((m, g) => Math.max(m, valueOf(g)), 0) || 1
+  const peak = groups.reduce((max, item) => Math.max(max, valueOf(item)), 0) || 1
   const empty = !totals.requests
 
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card className="soft-card" variant="borderless" size="small">
-        <Space wrap size={20}>
-          <Space size={8}>
+    <div className="stack">
+      <PageHeader
+        title="用量"
+        description="按时间、供应商、模型与调用方查看 token 消耗和调用次数。"
+      />
+
+      <Panel title="筛选" subtitle="只采信上游上报的用量；缺失数据单独计数，不估算。">
+        <div className="usage-toolbar">
+          <Space size={8} wrap>
             <Text type="secondary">时间</Text>
             <Segmented options={RANGES} value={range} onChange={setRange} />
+            {range === 'custom' ? <RangePicker value={dates} onChange={setDates} allowClear={false} /> : null}
           </Space>
-          {range === 'custom' && <RangePicker value={dates} onChange={setDates} allowClear={false} />}
-          <Space size={8}>
+          <Space size={8} wrap>
             <Text type="secondary">分组</Text>
             <Segmented options={GROUPS} value={group} onChange={setGroup} />
           </Space>
-          <Space size={8}>
+          <Space size={8} wrap>
             <Text type="secondary">指标</Text>
             <Segmented options={METRICS} value={metric} onChange={setMetric} />
           </Space>
-          {data && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
+          {data ? (
+            <Text type="secondary">
               {data.from} ~ {data.to} · {data.granularity === 'hour' ? '按小时' : data.granularity === 'month' ? '按月' : '按天'}
             </Text>
-          )}
-        </Space>
-      </Card>
+          ) : null}
+        </div>
+      </Panel>
 
-      <Row gutter={16}>
-        <Col span={6}>
-          <Stat label="调用次数" value={totals.requests ?? 0} extra={totals.err ? `${totals.err} 次失败` : '全部成功'} accent="#2f6bff" />
-        </Col>
-        <Col span={6}>
-          <Stat label="输入 Token" value={fmtTokens(totals.input_tokens)} extra={`缓存命中 ${fmtTokens(totals.cached_tokens)}`} accent="#13a8a8" />
-        </Col>
-        <Col span={6}>
-          <Stat label="输出 Token" value={fmtTokens(totals.output_tokens)} extra={`推理 ${fmtTokens(totals.reasoning_tokens)}`} accent="#fa8c16" />
-        </Col>
-        <Col span={6}>
-          <Stat
-            label="合计 Token"
-            value={fmtTokens(totals.total_tokens)}
-            extra={totals.missing_usage ? `${totals.missing_usage} 次无用量` : '用量完整'}
-            accent="#722ed1"
-          />
-        </Col>
-      </Row>
+      <div className="metric-strip">
+        <div className="metric-strip-item">
+          <div className="metric-strip-label">调用次数</div>
+          <div className="metric-strip-value">{totals.requests ?? 0}</div>
+          <div className="metric-strip-extra">{totals.err ? `${totals.err} 次失败` : '全部成功'}</div>
+        </div>
+        <div className="metric-strip-item">
+          <div className="metric-strip-label">输入 Token</div>
+          <div className="metric-strip-value">{fmtTokens(totals.input_tokens)}</div>
+          <div className="metric-strip-extra">缓存命中 {fmtTokens(totals.cached_tokens)}</div>
+        </div>
+        <div className="metric-strip-item">
+          <div className="metric-strip-label">输出 Token</div>
+          <div className="metric-strip-value">{fmtTokens(totals.output_tokens)}</div>
+          <div className="metric-strip-extra">推理 {fmtTokens(totals.reasoning_tokens)}</div>
+        </div>
+        <div className="metric-strip-item">
+          <div className="metric-strip-label">合计 Token</div>
+          <div className="metric-strip-value">{fmtTokens(totals.total_tokens)}</div>
+          <div className="metric-strip-extra">
+            {totals.missing_usage ? `${totals.missing_usage} 次无用量` : '用量完整'}
+          </div>
+        </div>
+      </div>
 
-      <Card className="soft-card" variant="borderless" title="趋势">
+      <Panel
+        title="趋势"
+        extra={<Text type="secondary">{metric === 'requests' ? '调用次数' : 'Token 数'}</Text>}
+      >
         {empty || !chart ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这段时间还没有调用" />
+          <EmptyState title="这段时间还没有调用" description="接入 Agent 并完成一次模型调用后，这里会显示趋势。" />
         ) : (
           <TrendChart series={chart.series} formatValue={formatValue} />
         )}
-      </Card>
+      </Panel>
 
-      {group !== 'all' && (
-        <Card className="soft-card" variant="borderless" title="分组占比">
-          <Row gutter={[24, 12]}>
-            {empty ? (
-              <Col span={24}>
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />
-              </Col>
-            ) : (
-              groups.map((g, i) => (
-                <Col span={12} key={g.key || 'all'}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                    <Text style={{ fontSize: 12 }}>{groupLabel(g).main}</Text>
-                    <Text className="mono" style={{ fontSize: 12 }}>{formatValue(valueOf(g))}</Text>
+      {group !== 'all' ? (
+        <Panel title="分组占比" subtitle={metric === 'requests' ? '按调用次数' : '按 Token 数'}>
+          {empty ? (
+            <EmptyState title="暂无分组数据" />
+          ) : (
+            <div className="usage-group-list">
+              {groups.map((item, index) => (
+                <div className="usage-group-row" key={item.key || 'all'}>
+                  <div className="usage-group-head">
+                    <span>{groupLabel(item).main}</span>
+                    <span className="mono">{formatValue(valueOf(item))}</span>
                   </div>
-                  <div style={{ background: '#f0f2f7', borderRadius: 4, height: 8 }}>
+                  <div className="usage-bar">
                     <div
+                      className="usage-bar-fill"
                       style={{
-                        width: `${Math.round((valueOf(g) / peak) * 100)}%`,
-                        height: '100%',
-                        borderRadius: 4,
-                        background: PALETTE[i % PALETTE.length]
+                        width: `${Math.round((valueOf(item) / peak) * 100)}%`,
+                        background: PALETTE[index % PALETTE.length]
                       }}
                     />
                   </div>
-                </Col>
-              ))
-            )}
-          </Row>
-        </Card>
-      )}
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+      ) : null}
 
-      <Card className="soft-card" variant="borderless" title="明细">
+      <Panel title="明细" bodyClassName="flush">
         <Table
           size="small"
-          rowKey={(r) => r.key || 'all'}
+          rowKey={(row) => row.key || 'all'}
           loading={loading}
           pagination={groups.length > 10 ? { pageSize: 10 } : false}
           dataSource={groups}
           scroll={{ x: 860 }}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" /> }}
+          locale={{
+            emptyText: (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />
+            )
+          }}
           columns={[
             {
               title: '分组',
               dataIndex: 'key',
-              render: (_, r) => {
-                const g = groupLabel(r)
+              render: (_, row) => {
+                const item = groupLabel(row)
                 return (
                   <Space direction="vertical" size={0}>
-                    <Text strong>{g.main}</Text>
-                    {g.sub && <Text type="secondary" style={{ fontSize: 12 }}>{g.sub}</Text>}
+                    <Text strong>{item.main}</Text>
+                    {item.sub ? <Text type="secondary">{item.sub}</Text> : null}
                   </Space>
                 )
               }
             },
             { title: '调用', dataIndex: 'requests', width: 80 },
-            { title: '失败', dataIndex: 'err', width: 72, render: (v) => (v ? <Text type="danger">{v}</Text> : '0') },
+            { title: '失败', dataIndex: 'err', width: 72, render: (value) => (value ? <Text type="danger">{value}</Text> : '0') },
             { title: '输入', dataIndex: 'input_tokens', width: 96, render: fmtTokens },
             { title: '输出', dataIndex: 'output_tokens', width: 96, render: fmtTokens },
-            { title: '合计', dataIndex: 'total_tokens', width: 96, render: (v) => <Text strong>{fmtTokens(v)}</Text> },
+            { title: '合计', dataIndex: 'total_tokens', width: 96, render: (value) => <Text strong>{fmtTokens(value)}</Text> },
             { title: '缓存', dataIndex: 'cached_tokens', width: 88, render: fmtTokens },
             { title: '推理', dataIndex: 'reasoning_tokens', width: 88, render: fmtTokens },
-            { title: '无用量', dataIndex: 'missing_usage', width: 84, render: (v) => (v ? <Text type="warning">{v}</Text> : '—') }
+            { title: '无用量', dataIndex: 'missing_usage', width: 84, render: (value) => (value ? <Text type="warning">{value}</Text> : '—') }
           ]}
         />
-      </Card>
-    </Space>
+      </Panel>
+    </div>
   )
 }

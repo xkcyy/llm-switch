@@ -18,22 +18,25 @@ import {
 } from 'antd'
 import { ReloadOutlined, RightOutlined } from '@ant-design/icons'
 import { Api } from '../api'
+import PageHeader from '../components/PageHeader'
+import Panel from '../components/Panel'
+import { uiTokens } from '../theme'
 
 const { Text } = Typography
 
 // KIND 把轨迹行类型映射成中文标签与颜色。
 const KIND = {
-  system: { label: '系统', color: 'blue', border: '#2f6bff' },
-  context: { label: '上下文', color: 'geekblue', border: '#2f54eb' },
-  user: { label: '用户', color: 'green', border: '#52c41a' },
-  assistant: { label: '助手', color: 'purple', border: '#722ed1' },
-  reasoning: { label: '思考', color: 'gold', border: '#faad14' },
-  'tool-call': { label: '工具', color: 'orange', border: '#fa8c16' },
-  'tool-result': { label: '结果', color: 'cyan', border: '#13c2c2' },
-  other: { label: '其它', color: 'default', border: '#8c93a4' }
+  system: { label: '系统', color: 'blue', border: uiTokens.blue },
+  context: { label: '上下文', color: 'geekblue', border: uiTokens.violet },
+  user: { label: '用户', color: 'green', border: uiTokens.green },
+  assistant: { label: '助手', color: 'purple', border: uiTokens.violet },
+  reasoning: { label: '思考', color: 'gold', border: uiTokens.amber },
+  'tool-call': { label: '工具', color: 'orange', border: uiTokens.amber },
+  'tool-result': { label: '结果', color: 'cyan', border: uiTokens.cyan },
+  other: { label: '其它', color: 'default', border: uiTokens.inkMuted }
 }
 
-const kindOf = (k) => KIND[k] || { label: k || '其它', color: 'default', border: '#8c93a4' }
+const kindOf = (k) => KIND[k] || { label: k || '其它', color: 'default', border: uiTokens.inkMuted }
 
 const fmtBytes = (n) => {
   if (!n) return '0 B'
@@ -71,7 +74,7 @@ function Pre({ text, max = 600 }) {
     <div>
       <pre className="trace-pre">{shown}</pre>
       {long && (
-        <Button size="small" type="link" style={{ padding: 0 }} onClick={() => setOpen((v) => !v)}>
+        <Button size="small" type="link" className="button-link-flush" onClick={() => setOpen((v) => !v)}>
           {open ? '收起' : `展开全部（${text.length} 字）`}
         </Button>
       )}
@@ -88,31 +91,31 @@ function RowDetail({ row }) {
         <Tag color={k.color} bordered={false}>
           {k.label}
         </Tag>
-        <Text type="secondary" style={{ fontSize: 12 }}>
+        <Text type="secondary" className="text-xs">
           #{row.index}
         </Text>
         {row.name && <Text strong>{row.name}</Text>}
         {row.call_id && (
-          <Text type="secondary" className="mono" style={{ fontSize: 12 }}>
+          <Text type="secondary" className="mono text-xs">
             {row.call_id}
           </Text>
         )}
         {row.images > 0 && <Tag bordered={false}>图片 × {row.images}</Tag>}
         {row.label && !row.name && (
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text type="secondary" className="text-xs">
             {row.label}
           </Text>
         )}
       </div>
       {row.role && (
-        <Text type="secondary" style={{ fontSize: 12 }}>
+        <Text type="secondary" className="text-xs">
           role: {row.role}
         </Text>
       )}
       {row.text && <Pre text={row.text} max={0} />}
       {row.arguments && (
         <div className="trace-sub">
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text type="secondary" className="text-xs">
             参数
           </Text>
           <Pre text={prettyJSON(row.arguments)} max={0} />
@@ -120,7 +123,7 @@ function RowDetail({ row }) {
       )}
       {row.output && (
         <div className="trace-sub">
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text type="secondary" className="text-xs">
             结果
           </Text>
           <Pre text={row.output} max={0} />
@@ -255,7 +258,7 @@ export default function Trajectory() {
       render: (v) =>
         v ? (
           <Tooltip title={v}>
-            <Text className="mono" style={{ fontSize: 12 }}>
+            <Text className="mono text-xs">
               {v}
             </Text>
           </Tooltip>
@@ -364,20 +367,18 @@ export default function Trajectory() {
   ]
 
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card
-        className="soft-card"
-        variant="borderless"
+    <div className="stack">
+      <PageHeader
+        title="请求轨迹"
+        description="回看最近入站请求的系统提示词、工具与执行链路；仅存内存，不落盘。"
+      />
+      <Panel
         title="入站请求"
+        subtitle={`仅保留最近 ${capacity} 条 · 点开单条查看完整链路`}
         extra={
           <Space>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              仅保留最近 {capacity} 条 · 不落盘 · 点开单条查看完整链路
-            </Text>
             <Space size={6}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                自动刷新（5 秒）
-              </Text>
+              <Text type="secondary">自动刷新（5 秒）</Text>
               <Switch size="small" checked={autoRefresh} onChange={setAutoRefresh} />
             </Space>
             <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => load()}>
@@ -385,6 +386,7 @@ export default function Trajectory() {
             </Button>
           </Space>
         }
+        bodyClassName="flush"
       >
         <Table
           size="small"
@@ -404,7 +406,7 @@ export default function Trajectory() {
           }}
           columns={columns}
         />
-      </Card>
+      </Panel>
 
       <Drawer
         width={960}
@@ -460,13 +462,13 @@ export default function Trajectory() {
                   {rawData.entry.method}
                 </Tag>
                 <span className="mono trace-raw-url">{rawData.entry.url}</span>
-                <Text type="secondary" style={{ fontSize: 12 }}>
+                <Text type="secondary" className="text-xs">
                   {rawData.entry.proto}
                 </Text>
               </div>
               <div className="trace-raw-headers">
                 {rawData.headers.length === 0 ? (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
+                  <Text type="secondary" className="text-xs">
                     没有记录到请求头
                   </Text>
                 ) : (
@@ -482,6 +484,6 @@ export default function Trajectory() {
           <pre className="trace-pre">{rawData?.body}</pre>
         </div>
       </Modal>
-    </Space>
+    </div>
   )
 }

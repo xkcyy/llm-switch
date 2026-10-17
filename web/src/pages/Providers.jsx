@@ -2,15 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   App,
+  Badge,
   Button,
-  Card,
-  Divider,
   Dropdown,
   Empty,
   Form,
   Input,
   InputNumber,
-  List,
   Modal,
   Popconfirm,
   Radio,
@@ -24,9 +22,7 @@ import {
 } from 'antd'
 import {
   ApiOutlined,
-  CheckCircleTwoTone,
   CloudDownloadOutlined,
-  CopyOutlined,
   DeleteOutlined,
   EditOutlined,
   EllipsisOutlined,
@@ -39,8 +35,12 @@ import {
   WarningOutlined
 } from '@ant-design/icons'
 import { PRESETS, useApp } from '../store'
+import PageHeader from '../components/PageHeader'
+import Panel from '../components/Panel'
+import CopyText from '../components/CopyText'
+import { EmptyState } from '../components/States'
 
-const { Text, Paragraph } = Typography
+const { Text } = Typography
 
 const PROTOCOL_LABEL = {
   chat: 'OpenAI Chat',
@@ -98,6 +98,7 @@ export default function Providers() {
   const { message } = App.useApp()
   const [selectedId, setSelectedId] = useState(app.providers[0]?.id)
   const [addOpen, setAddOpen] = useState(false)
+  const [addDefaults, setAddDefaults] = useState(null)
   const [saving, setSaving] = useState(false)
   const [importState, setImportState] = useState(null)
   const [importing, setImporting] = useState(false)
@@ -106,20 +107,14 @@ export default function Providers() {
   const [search, setSearch] = useState('')
   const [form] = Form.useForm()
   const autoIdRef = useRef('')
-  const [narrow, setNarrow] = useState(window.innerWidth < 1360)
-
-  useEffect(() => {
-    const onResize = () => setNarrow(window.innerWidth < 1360)
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
   const [editProvider, setEditProvider] = useState(null)
+  const [editDefaults, setEditDefaults] = useState(null)
   const [editForm] = Form.useForm()
   const [keyField, setKeyField] = useState({ value: '', masked: '', dirty: false, visible: false })
 
   const openEdit = (p) => {
     setEditProvider(p)
-    editForm.setFieldsValue({ id: p.id, name: p.name, baseUrl: p.baseUrl, protocols: p.protocols || [p.protocol] })
+    setEditDefaults({ id: p.id, name: p.name, baseUrl: p.baseUrl, protocols: p.protocols || [p.protocol] })
     setKeyField({ value: p.keyMasked || '', masked: p.keyMasked || '', dirty: false, visible: false })
   }
 
@@ -140,10 +135,9 @@ export default function Providers() {
     setKeyField((s) => ({ ...s, visible }))
   }
   const [modelModal, setModelModal] = useState(null)
+  const [modelDefaults, setModelDefaults] = useState(null)
   const [modelForm] = Form.useForm()
-  const contextValue = Form.useWatch('contextWindow', modelForm)
-  const outputValue = Form.useWatch('maxOutputTokens', modelForm)
-  const modelIdValue = Form.useWatch('id', modelForm)
+  const [modelWatched, setModelWatched] = useState({})
 
   const selected = app.providers.find((p) => p.id === selectedId) || null
   const presets = app.presets?.length ? app.presets : PRESETS
@@ -154,7 +148,7 @@ export default function Providers() {
 
   const openAdd = () => {
     const fallback = presets.find((p) => p.key === 'deepseek') || presets[0]
-    form.setFieldsValue({
+    setAddDefaults({
       preset: fallback.key,
       name: fallback.label,
       id: deriveId(fallback.label),
@@ -244,169 +238,159 @@ export default function Providers() {
   }
 
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Alert
-        type="info"
-        showIcon
-        icon={<ThunderboltOutlined />}
-        message="添加供应商只需要两步：选择预设、粘贴 API Key"
-        description="接口地址、协议、模型信息都会自动填好；模型保留服务商原始 ID，对外请求名自动拼接为「供应商 ID/模型 ID」。"
-        action={
-          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openAdd}>
+    <div className="stack">
+      <PageHeader
+        title="供应商与模型"
+        description="选择预设、粘贴 API Key，接口地址与模型信息自动补全。"
+        actions={
+          <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
             添加供应商
           </Button>
         }
       />
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: narrow ? '1fr' : '300px minmax(0, 1fr)',
-          gap: 16,
-          alignItems: 'start'
-        }}
-      >
-        <Card
-          className="soft-card"
-          variant="borderless"
+      <div className="provider-layout">
+        <Panel
           title="供应商"
-          styles={{ body: { padding: 8, maxHeight: 'calc(100vh - 300px)', overflowY: 'auto' } }}
+          subtitle={`${app.providers.length} 个`}
           extra={
             <Button size="small" type="text" icon={<PlusOutlined />} onClick={openAdd}>
               添加
             </Button>
           }
+          bodyClassName="tight"
         >
           {app.providers.length === 0 ? (
-            <Empty description="还没有供应商" image={Empty.PRESENTED_IMAGE_SIMPLE}>
-              <Button type="primary" onClick={openAdd}>
-                添加第一个供应商
-              </Button>
-            </Empty>
+            <EmptyState
+              title="还没有供应商"
+              description="选择预设、粘贴 API Key，其余信息自动补全。"
+              actionLabel="添加第一个供应商"
+              onAction={openAdd}
+            />
           ) : (
-            <List
-              split={false}
-              dataSource={app.providers}
-              renderItem={(p) => {
+            <div className="provider-list">
+              {app.providers.map((p) => {
                 const count = app.models.filter((m) => m.providerId === p.id).length
                 return (
-                  <List.Item
+                  <div
+                    key={p.id}
                     className={'provider-item' + (p.id === selected?.id ? ' active' : '')}
                     onClick={() => setSelectedId(p.id)}
-                    style={{ display: 'block' }}
                   >
-                    <Space align="start" style={{ width: '100%', justifyContent: 'space-between' }}>
-                      <Space align="start" size={10}>
-                        <CheckCircleTwoTone twoToneColor="#52c41a" style={{ marginTop: 2, opacity: p.enabled ? 1 : 0.25 }} />
-                        <div>
-                          <div className="provider-name">
-                            {p.name}
-                            <Text code style={{ marginInlineStart: 6, fontSize: 11 }}>
-                              {p.id}
-                            </Text>
-                          </div>
-                          <div className="provider-meta">
-                            {protocolLabels(p) || '—'} · {count} 个模型
-                          </div>
+                    <div className="provider-item-head">
+                      <div className="provider-item-main">
+                        <div className="provider-name">{p.name}</div>
+                        <div className="provider-meta">
+                          <span className="mono">{p.id}</span> · {protocolLabels(p) || '—'} · {count} 个模型
                         </div>
-                      </Space>
-                      <Dropdown
-                        trigger={['click']}
-                        menu={{
-                          items: [
-                            { key: 'test', icon: <ApiOutlined />, label: '测试连接' },
-                            { key: 'edit', icon: <EditOutlined />, label: '编辑' },
-                            { type: 'divider' },
-                            { key: 'del', icon: <DeleteOutlined />, label: '删除', danger: true }
-                          ],
-                          onClick: ({ key, domEvent }) => {
-                            domEvent.stopPropagation()
-                            if (key === 'test') app.testProvider(p.id)
-                            if (key === 'edit') {
-                              openEdit(p)
+                      </div>
+                      <div className="provider-item-actions">
+                        <Badge status={p.enabled ? 'success' : 'default'} />
+                        <Dropdown
+                          trigger={['click']}
+                          menu={{
+                            items: [
+                              { key: 'test', icon: <ApiOutlined />, label: '测试连接' },
+                              { key: 'edit', icon: <EditOutlined />, label: '编辑' },
+                              { type: 'divider' },
+                              { key: 'del', icon: <DeleteOutlined />, label: '删除', danger: true }
+                            ],
+                            onClick: ({ key, domEvent }) => {
+                              domEvent.stopPropagation()
+                              if (key === 'test') app.testProvider(p.id)
+                              if (key === 'edit') openEdit(p)
+                              if (key === 'del') {
+                                Modal.confirm({
+                                  title: `删除 ${p.name}？`,
+                                  content: `将同时删除该供应商下的 ${count} 个模型，Codex 配置会自动更新。`,
+                                  okText: '删除',
+                                  okButtonProps: { danger: true },
+                                  cancelText: '取消',
+                                  onOk: () => {
+                                    app.removeProvider(p.id)
+                                    if (selectedId === p.id) setSelectedId(null)
+                                  }
+                                })
+                              }
                             }
-                            if (key === 'del') {
-                              Modal.confirm({
-                                title: `删除 ${p.name}？`,
-                                content: `将同时删除该供应商下的 ${count} 个模型，Codex 配置会自动更新。`,
-                                okText: '删除',
-                                okButtonProps: { danger: true },
-                                cancelText: '取消',
-                                onOk: () => {
-                                  app.removeProvider(p.id)
-                                  if (selectedId === p.id) setSelectedId(null)
-                                }
-                              })
-                            }
-                          }
-                        }}
-                      >
-                        <Button size="small" type="text" icon={<EllipsisOutlined />} onClick={(e) => e.stopPropagation()} />
-                      </Dropdown>
-                    </Space>
-                  </List.Item>
+                          }}
+                        >
+                          <Button
+                            size="small"
+                            type="text"
+                            icon={<EllipsisOutlined />}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </Dropdown>
+                      </div>
+                    </div>
+                  </div>
                 )
-              }}
-            />
+              })}
+            </div>
           )}
-        </Card>
+        </Panel>
 
         {selected ? (
-          <Card
-            className="soft-card"
-            variant="borderless"
-            style={{ minWidth: 0 }}
+          <Panel
             title={
-              <Space size={8}>
-                {selected.name}
+              <div className="selected-provider-title">
+                <span>{selected.name}</span>
                 <Tag bordered={false}>{protocolLabels(selected) || '—'}</Tag>
-                {selected.testing && <Tag color="processing">测试中…</Tag>}
-              </Space>
+                {selected.testing ? <Tag color="processing">测试中…</Tag> : null}
+              </div>
             }
             extra={
               <Space>
-                <Button size="small" icon={<ApiOutlined />} loading={selected.testing} onClick={() => app.testProvider(selected.id)}>
+                <Button
+                  size="small"
+                  icon={<ApiOutlined />}
+                  loading={selected.testing}
+                  onClick={() => app.testProvider(selected.id)}
+                >
                   测试连接
                 </Button>
-                <Button size="small" type="primary" ghost icon={<CloudDownloadOutlined />} loading={syncing} onClick={syncUpstream}>
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<CloudDownloadOutlined />}
+                  loading={syncing}
+                  onClick={syncUpstream}
+                >
                   从上游同步模型
                 </Button>
               </Space>
             }
           >
-            <Space direction="vertical" size={12} style={{ width: '100%', minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-                <Text type="secondary" className="mono provider-url" ellipsis={{ tooltip: selected.baseUrl }} style={{ minWidth: 0 }}>
-                  {selected.baseUrl}
-                </Text>
-                <Button
-                  type="link"
-                  size="small"
-                  icon={<EyeOutlined />}
-                  style={{ flex: 'none', paddingInline: 0 }}
-                  onClick={() => openEdit(selected)}
-                >
+            <div className="stack stack-sm">
+              <div className="config-strip">
+                <div className="config-strip-main">
+                  <div className="config-strip-label">接口地址</div>
+                  <div className="config-strip-value">
+                    <CopyText value={selected.baseUrl} />
+                  </div>
+                </div>
+                <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => openEdit(selected)}>
                   密钥 {selected.keyMasked || '未设置'}
                 </Button>
               </div>
-              <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                <Space>
+
+              <div className="model-toolbar">
+                <div className="model-toolbar-left">
                   <Input.Search
                     allowClear
+                    className="model-search"
                     placeholder="搜索模型"
-                    style={{ width: 220 }}
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                   />
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {providerModels.length} 个模型
-                  </Text>
-                </Space>
+                  <Text type="secondary">{providerModels.length} 个模型</Text>
+                </div>
                 <Button
                   size="small"
                   icon={<PlusOutlined />}
                   onClick={() => {
-                    modelForm.setFieldsValue({
+                    const defaults = {
                       id: '',
                       name: '',
                       contextWindow: 128000,
@@ -415,13 +399,15 @@ export default function Providers() {
                       protocol: undefined,
                       vision: false,
                       enabled: true
-                    })
+                    }
+                    setModelDefaults(defaults)
+                    setModelWatched(defaults)
                     setModelModal({ mode: 'add', provider: selected })
                   }}
                 >
                   手动添加
                 </Button>
-              </Space>
+              </div>
 
               <Table
                 size="small"
@@ -446,22 +432,18 @@ export default function Providers() {
                     ellipsis: true,
                     render: (v, r) => (
                       <Tooltip title={v}>
-                        <div style={{ minWidth: 0 }}>
+                        <div>
                           <Space size={4}>
                             <Text className="mono">{v}</Text>
-                            {(r.caps || []).includes('vision') && (
+                            {(r.caps || []).includes('vision') ? (
                               <Tooltip title="已声明图片输入：Codex 可粘贴截图">
-                                <Tag bordered={false} color="blue" style={{ marginInlineEnd: 0 }}>
+                                <Tag bordered={false} color="blue">
                                   图片
                                 </Tag>
                               </Tooltip>
-                            )}
+                            ) : null}
                           </Space>
-                          {r.name && r.name !== v && (
-                            <div className="provider-meta" style={{ marginTop: 0 }}>
-                              {r.name}
-                            </div>
-                          )}
+                          {r.name && r.name !== v ? <div className="provider-meta">{r.name}</div> : null}
                         </div>
                       </Tooltip>
                     )
@@ -471,33 +453,18 @@ export default function Providers() {
                     dataIndex: 'slug',
                     width: 210,
                     ellipsis: true,
-                    render: (v) => (
-                      <Tooltip title="由「供应商 ID/模型 ID」自动拼接，Codex 请求时使用">
-                        <Space size={4}>
-                          <Text className="mono">{v}</Text>
-                          <Button
-                            type="text"
-                            size="small"
-                            icon={<CopyOutlined />}
-                            onClick={() => {
-                              navigator.clipboard?.writeText(v)
-                              message.success('已复制 ' + v)
-                            }}
-                          />
-                        </Space>
-                      </Tooltip>
-                    )
+                    render: (v) => <CopyText value={v} label="复制请求名" />
                   },
                   {
                     title: '输入窗口',
                     dataIndex: 'contextWindow',
-                    width: 74,
+                    width: 86,
                     render: (v) => (v ? <Text type="secondary">{formatK(v)}</Text> : '—')
                   },
                   {
                     title: '输出窗口',
                     dataIndex: 'maxOutputTokens',
-                    width: 74,
+                    width: 86,
                     render: (v) => (v ? <Text type="secondary">{formatK(v)}</Text> : '—')
                   },
                   {
@@ -507,7 +474,7 @@ export default function Providers() {
                     render: (v) =>
                       v?.length ? (
                         <Tooltip title={v.join(' · ')}>
-                          <Text type="secondary" ellipsis style={{ maxWidth: '100%' }}>
+                          <Text type="secondary" ellipsis>
                             {v.join(' · ')}
                           </Text>
                         </Tooltip>
@@ -519,7 +486,9 @@ export default function Providers() {
                     title: '启用',
                     dataIndex: 'enabled',
                     width: 56,
-                    render: (v, r) => <Switch size="small" checked={v} onChange={(checked) => app.toggleModel(r.id, checked)} />
+                    render: (v, r) => (
+                      <Switch size="small" checked={v} onChange={(checked) => app.toggleModel(r.id, checked)} />
+                    )
                   },
                   {
                     title: '操作',
@@ -528,7 +497,12 @@ export default function Providers() {
                     render: (_, r) => (
                       <Space size={0}>
                         <Tooltip title="发送一次最小请求验证可用">
-                          <Button size="small" type="link" icon={<ThunderboltOutlined />} onClick={() => app.testModel(r.id)} />
+                          <Button
+                            size="small"
+                            type="link"
+                            icon={<ThunderboltOutlined />}
+                            onClick={() => app.testModel(r.id)}
+                          />
                         </Tooltip>
                         <Tooltip title="编辑">
                           <Button
@@ -536,7 +510,7 @@ export default function Providers() {
                             type="text"
                             icon={<EditOutlined />}
                             onClick={() => {
-                              modelForm.setFieldsValue({
+                              const defaults = {
                                 id: r.id,
                                 name: r.name,
                                 contextWindow: r.contextWindow,
@@ -545,7 +519,9 @@ export default function Providers() {
                                 protocol: r.protocol || undefined,
                                 vision: (r.caps || []).includes('vision'),
                                 enabled: r.enabled
-                              })
+                              }
+                              setModelDefaults(defaults)
+                              setModelWatched(defaults)
                               setModelModal({ mode: 'edit', provider: selected, record: r })
                             }}
                           />
@@ -565,15 +541,14 @@ export default function Providers() {
                   }
                 ]}
               />
-            </Space>
-          </Card>
+            </div>
+          </Panel>
         ) : (
-          <Card className="soft-card" variant="borderless">
-            <Empty description="选择左侧供应商查看模型" />
-          </Card>
+          <Panel>
+            <EmptyState title="选择供应商" description="从左侧选择一个供应商查看和管理模型。" />
+          </Panel>
         )}
       </div>
-
       <Modal
         title="添加供应商"
         open={addOpen}
@@ -583,10 +558,10 @@ export default function Providers() {
         cancelText="取消"
         confirmLoading={saving}
         width={640}
-        destroyOnClose
+        destroyOnHidden
         styles={{ body: { maxHeight: '62vh', overflowY: 'auto' } }}
       >
-        <Form form={form} layout="vertical" requiredMark={false} initialValues={{ preset: 'deepseek' }}>
+        <Form form={form} layout="vertical" requiredMark={false} initialValues={addDefaults || { preset: 'deepseek' }}>
           <Form.Item name="preset" label="选择服务商" rules={[{ required: true }]}>
             <Radio.Group onChange={(e) => onPresetChange(e.target.value)} optionType="button" buttonStyle="solid">
               {presets.map((p) => (
@@ -644,7 +619,7 @@ export default function Providers() {
         open={!!importState}
         onCancel={() => setImportState(null)}
         afterClose={() => setImportState(null)}
-        destroyOnClose
+        destroyOnHidden
         onOk={doImport}
         okText={`添加选中的 ${importState?.keys.length || 0} 个模型`}
         cancelText="稍后再说"
@@ -789,10 +764,10 @@ export default function Providers() {
         okText="保存"
         cancelText="取消"
         width={560}
-        destroyOnClose
+        destroyOnHidden
         styles={{ body: { maxHeight: '62vh', overflowY: 'auto' } }}
       >
-        <Form form={editForm} layout="vertical" requiredMark={false}>
+        <Form form={editForm} layout="vertical" requiredMark={false} initialValues={editDefaults || {}}>
           <Form.Item name="name" label="显示名称" rules={[{ required: true, message: '请填写名称' }]}>
             <Input />
           </Form.Item>
@@ -846,10 +821,16 @@ export default function Providers() {
         okText="保存"
         cancelText="取消"
         width={600}
-        destroyOnClose
+        destroyOnHidden
         styles={{ body: { maxHeight: '60vh', overflowY: 'auto', paddingRight: 8 } }}
       >
-        <Form form={modelForm} layout="vertical" requiredMark={false}>
+        <Form
+          form={modelForm}
+          layout="vertical"
+          requiredMark={false}
+          initialValues={modelDefaults || {}}
+          onValuesChange={(_, values) => setModelWatched(values)}
+        >
           <Form.Item
             name="id"
             label="模型 ID（上游原始标识）"
@@ -863,7 +844,7 @@ export default function Providers() {
             <Input className="mono" placeholder="例如 deepseek-chat" />
           </Form.Item>
           <Form.Item label="对外请求名" extra="由「供应商 ID/模型 ID」自动拼接；Codex 的模型列表与请求都使用这个名称">
-            <Input className="mono" readOnly value={`${modelModal?.provider?.id || ''}/${modelIdValue || ''}`} />
+            <Input className="mono" readOnly value={`${modelModal?.provider?.id || ''}/${modelWatched.id || ''}`} />
           </Form.Item>
           <Form.Item name="name" label="模型名称（原始名称）" extra="留空默认与模型 ID 一致">
             <Input placeholder="例如 DeepSeek Chat" />
@@ -873,7 +854,7 @@ export default function Providers() {
               <InputNumber min={1024} step={1024} style={{ width: '100%' }} placeholder="例如 128000" />
             </Form.Item>
             <PresetTags
-              value={contextValue}
+              value={modelWatched.contextWindow}
               presets={CONTEXT_PRESETS}
               onPick={(v) => modelForm.setFieldValue('contextWindow', v)}
             />
@@ -883,7 +864,7 @@ export default function Providers() {
               <InputNumber min={256} step={256} style={{ width: '100%' }} placeholder="例如 16384" />
             </Form.Item>
             <PresetTags
-              value={outputValue}
+              value={modelWatched.maxOutputTokens}
               presets={OUTPUT_PRESETS}
               onPick={(v) => modelForm.setFieldValue('maxOutputTokens', v)}
             />
@@ -922,7 +903,7 @@ export default function Providers() {
           </Form.Item>
         </Form>
       </Modal>
-    </Space>
+    </div>
   )
 }
 

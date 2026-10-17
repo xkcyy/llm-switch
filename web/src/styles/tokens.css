@@ -1,0 +1,53 @@
+:root {
+  --ls-rail: #0f1620;
+  --ls-rail-soft: #151e2b;
+  --ls-rail-line: #263244;
+  --ls-canvas: #f4f6f9;
+  --ls-surface: #ffffff;
+  --ls-surface-soft: #f8fafc;
+  --ls-ink: #151b24;
+  --ls-ink-soft: #5e6877;
+  --ls-ink-muted: #66707f;
+  --ls-line: #e3e8ef;
+  --ls-line-strong: #cdd5df;
+  --ls-blue: #2f6bff;
+  --ls-blue-soft: #eef4ff;
+  --ls-green: #16a34a;
+  --ls-green-strong: #15803d;
+  --ls-green-soft: #eefaf3;
+  --ls-amber: #d97706;
+  --ls-amber-soft: #fff7ed;
+  --ls-red: #dc2626;
+  --ls-red-soft: #fef2f2;
+  --ls-cyan: #0e7490;
+  --ls-violet: #7c3aed;
+
+  --ls-space-1: 4px;
+  --ls-space-2: 8px;
+  --ls-space-3: 12px;
+  --ls-space-4: 16px;
+  --ls-space-5: 20px;
+  --ls-space-6: 24px;
+  --ls-space-8: 32px;
+  --ls-space-10: 40px;
+
+  --ls-radius-sm: 6px;
+  --ls-radius: 8px;
+  --ls-radius-lg: 12px;
+  --ls-radius-xl: 16px;
+  --ls-radius-pill: 999px;
+
+  --ls-text-11: 11px;
+  --ls-text-12: 12px;
+  --ls-text-13: 13px;
+  --ls-text-14: 14px;
+  --ls-text-16: 16px;
+  --ls-text-20: 20px;
+  --ls-text-28: 28px;
+
+  --ls-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  --ls-shadow: 0 10px 26px -18px rgba(15, 23, 42, 0.22);
+  --ls-shell-header: 56px;
+  --ls-sider-width: 248px;
+  --ls-sider-collapsed: 72px;
+}

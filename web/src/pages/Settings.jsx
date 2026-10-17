@@ -1,55 +1,68 @@
-import { App, Button, Card, Col, InputNumber, Row, Segmented, Select, Space, Switch, Tag, Typography } from 'antd'
+import { App, Button, InputNumber, Segmented, Select, Space, Switch, Tag, Typography } from 'antd'
 import { FolderOpenOutlined, ReloadOutlined, RocketOutlined, UndoOutlined } from '@ant-design/icons'
 import { useApp } from '../store'
+import PageHeader from '../components/PageHeader'
+import Panel from '../components/Panel'
 
-const { Text, Paragraph } = Typography
+const { Text } = Typography
 
-function RowItem({ title, desc, control }) {
+function RowItem({ title, description, control }) {
   return (
-    <Row align="middle" style={{ padding: '10px 0' }}>
-      <Col flex="auto">
-        <div style={{ fontWeight: 500 }}>{title}</div>
-        <div style={{ fontSize: 12, color: '#8c93a4' }}>{desc}</div>
-      </Col>
-      <Col>{control}</Col>
-    </Row>
+    <div className="settings-row">
+      <div className="settings-row-main">
+        <div className="settings-row-title">{title}</div>
+        <div className="settings-row-desc">{description}</div>
+      </div>
+      <div className="settings-row-control">{control}</div>
+    </div>
   )
 }
 
 export default function SettingsPage() {
   const app = useApp()
   const { message } = App.useApp()
-  const s = app.settings
+  const settings = app.settings
 
-  const update = (patch) => app.setSettings((prev) => ({ ...prev, ...patch }))
+  const update = (patch) => app.setSettings((previous) => ({ ...previous, ...patch }))
 
   const openDir = async (fn, label) => {
     try {
       await fn()
       message.success(`已打开${label}`)
-    } catch (e) {
-      message.error(e.message)
+    } catch (error) {
+      message.error(error.message)
     }
   }
+
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card className="soft-card" variant="borderless" title="使用方式">
+    <div className="stack">
+      <PageHeader
+        title="设置"
+        description="启动、代理、日志和本机数据选项；推荐默认值通常无需修改。"
+      />
+
+      <Panel title="启动与运行" subtitle="控制开机行为和管理页打开方式">
         <RowItem
           title="开机自动运行"
-          desc="登录 Windows 后静默启动并常驻托盘，Codex 随时可用"
-          control={<Switch checked={s.autoStart} onChange={(v) => update({ autoStart: v })} />}
+          description="登录 Windows 后静默启动并常驻托盘，Agent 随时可用。"
+          control={<Switch checked={settings.autoStart} onChange={(value) => update({ autoStart: value })} />}
         />
         <RowItem
           title="启动时打开控制台"
-          desc="关闭后仅托盘常驻，需要时从托盘菜单打开"
-          control={<Switch checked={s.openPanelOnStart} onChange={(v) => update({ openPanelOnStart: v })} />}
+          description="关闭后仅托盘常驻，需要时从托盘菜单打开。"
+          control={
+            <Switch
+              checked={settings.openPanelOnStart}
+              onChange={(value) => update({ openPanelOnStart: value })}
+            />
+          }
         />
-      </Card>
+      </Panel>
 
-      <Card className="soft-card" variant="borderless" title="本机代理">
+      <Panel title="本机代理" subtitle="Agent 通过这里访问模型，仅监听本机">
         <RowItem
           title="服务状态"
-          desc={`Codex 通过 ${app.proxy.host}:${app.proxy.port} 访问模型，仅监听本机`}
+          description={`Codex、OpenCode 等 Agent 通过 ${app.proxy.host}:${app.proxy.port} 访问模型。`}
           control={
             <Space>
               <Tag color={app.proxy.running ? 'success' : 'default'} bordered={false}>
@@ -63,33 +76,33 @@ export default function SettingsPage() {
         />
         <RowItem
           title="端口"
-          desc="一般无需修改；修改后会自动更新 Codex 配置"
+          description="一般无需修改；修改后会自动更新已接入 Agent 的配置。"
           control={
             <InputNumber
               min={1024}
               max={65535}
               value={app.proxy.port}
-              onChange={(v) => app.setProxy((p) => ({ ...p, port: v }))}
-              style={{ width: 120 }}
+              onChange={(value) => app.setProxy((proxy) => ({ ...proxy, port: value }))}
+              className="settings-port"
             />
           }
         />
         <RowItem
           title="允许局域网访问"
-          desc="当前版本仅监听本机地址，其他设备无法访问"
+          description="当前版本仅监听本机地址，其他设备无法访问。"
           control={<Tag bordered={false}>暂不支持</Tag>}
         />
-      </Card>
+      </Panel>
 
-      <Card className="soft-card" variant="borderless" title="日志与排查">
+      <Panel title="日志与排查" subtitle="按天滚动，超期自动清理">
         <RowItem
           title="日志级别"
-          desc="默认 info；排查问题时可以切到 debug"
+          description="默认 info；排查问题时可以切到 debug。"
           control={
             <Segmented
               size="small"
-              value={s.logLevel}
-              onChange={(v) => update({ logLevel: v })}
+              value={settings.logLevel}
+              onChange={(value) => update({ logLevel: value })}
               options={[
                 { label: 'info', value: 'info' },
                 { label: 'debug', value: 'debug' },
@@ -100,20 +113,20 @@ export default function SettingsPage() {
         />
         <RowItem
           title="日志保留"
-          desc="按天滚动，超期自动清理"
+          description="超过保留天数的日志会自动清理。"
           control={
             <Select
               size="small"
-              style={{ width: 120 }}
-              value={s.keepLogDays}
-              onChange={(v) => update({ keepLogDays: v })}
-              options={[3, 7, 15, 30].map((d) => ({ value: d, label: `${d} 天` }))}
+              className="settings-select"
+              value={settings.keepLogDays}
+              onChange={(value) => update({ keepLogDays: value })}
+              options={[3, 7, 15, 30].map((days) => ({ value: days, label: `${days} 天` }))}
             />
           }
         />
         <RowItem
           title="日志目录"
-          desc="包含运行日志与请求记录（已脱敏，不写入密钥）"
+          description="包含运行日志与请求记录；密钥不会写入日志。"
           control={
             <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openDir(app.openLogDir, '日志目录')}>
               打开
@@ -122,44 +135,52 @@ export default function SettingsPage() {
         />
         <RowItem
           title="记录请求轨迹"
-          desc="在「请求轨迹」页回看最近 50 条入站请求；仅存内存，重启即丢"
-          control={<Switch checked={s.traceEnabled !== false} onChange={(v) => update({ traceEnabled: v })} />}
+          description="在「请求轨迹」页回看最近 50 条入站请求；仅存内存，重启即丢。"
+          control={
+            <Switch
+              checked={settings.traceEnabled !== false}
+              onChange={(value) => update({ traceEnabled: value })}
+            />
+          }
         />
-      </Card>
+      </Panel>
 
-      <Card className="soft-card" variant="borderless" title="配置与数据">
+      <Panel title="配置与数据" subtitle="所有设置保存在本机配置文件中">
         <RowItem
           title="配置目录"
-          desc={<Text className="mono">{s.configDir}</Text>}
+          description={<Text className="mono">{settings.configDir}</Text>}
           control={
-            <Space>
-              <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openDir(app.openConfigDir, '配置目录')}>
-                打开
-              </Button>
-            </Space>
+            <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openDir(app.openConfigDir, '配置目录')}>
+              打开
+            </Button>
           }
         />
         <RowItem
           title="恢复默认设置"
-          desc="只重置界面选项，不会删除供应商、模型和 Codex 配置"
+          description="只重置界面选项，不会删除供应商、模型和 Agent 配置。"
           control={
             <Button
               size="small"
               danger
               icon={<UndoOutlined />}
               onClick={() =>
-                app.setSettings((prev) => ({ ...prev, autoStart: true, openPanelOnStart: true, logLevel: 'info', keepLogDays: 7 }))
+                app.setSettings((previous) => ({
+                  ...previous,
+                  autoStart: true,
+                  openPanelOnStart: true,
+                  logLevel: 'info',
+                  keepLogDays: 7
+                }))
               }
             >
               恢复默认
             </Button>
           }
         />
-        <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-          <RocketOutlined /> 所有设置都会保存在本机配置文件中，随时可以手动备份或迁移。
-        </Paragraph>
-      </Card>
-    </Space>
+        <div className="settings-footnote">
+          <RocketOutlined /> 设置会写入本机配置文件，可随时手动备份或迁移。
+        </div>
+      </Panel>
+    </div>
   )
 }
-

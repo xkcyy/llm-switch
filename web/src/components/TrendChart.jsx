@@ -1,6 +1,18 @@
 import { useState } from 'react'
+import { uiTokens } from '../theme'
 
-export const PALETTE = ['#2f6bff', '#13a8a8', '#fa8c16', '#722ed1', '#eb2f96', '#52c41a', '#f5222d', '#13c2c2', '#a0d911', '#8c93a4']
+export const PALETTE = [
+  uiTokens.blue,
+  uiTokens.cyan,
+  uiTokens.amber,
+  uiTokens.violet,
+  '#db2777',
+  uiTokens.green,
+  uiTokens.red,
+  '#0891b2',
+  '#65a30d',
+  uiTokens.inkMuted
+]
 
 const NICE = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
 
@@ -61,7 +73,7 @@ export default function TrendChart({ series, height = 230, formatValue = fmtAxis
     <div style={{ position: 'relative' }}>
       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 10 }}>
         {series.map((s, i) => (
-          <span key={s.key || i} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#5b6474' }}>
+          <span key={s.key || i} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--ls-ink-soft)' }}>
             <i style={{ width: 10, height: 10, borderRadius: 2, background: s.color || PALETTE[i % PALETTE.length], display: 'inline-block' }} />
             {s.name}
           </span>
@@ -71,15 +83,15 @@ export default function TrendChart({ series, height = 230, formatValue = fmtAxis
       <svg viewBox={`0 0 ${W} ${height}`} width="100%" height={height} onMouseLeave={() => setHover(null)}>
         {Array.from({ length: scale.count + 1 }, (_, i) => i * scale.step).map((v) => (
           <g key={v}>
-            <line x1={padL} x2={W - padR} y1={py(v)} y2={py(v)} stroke="#eef0f5" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-            <text x={padL - 8} y={py(v) + 4} textAnchor="end" fontSize="11" fill="#8c93a4">
+            <line x1={padL} x2={W - padR} y1={py(v)} y2={py(v)} stroke="var(--ls-line)" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+            <text x={padL - 8} y={py(v) + 4} textAnchor="end" fontSize="11" fill="var(--ls-ink-muted)">
               {fmtAxis(v)}
             </text>
           </g>
         ))}
 
         {hover != null && (
-          <rect x={padL + band * hover} y={padT} width={band} height={innerH} fill="#f7f8fb" />
+          <rect x={padL + band * hover} y={padT} width={band} height={innerH} fill="var(--ls-surface-soft)" />
         )}
 
         {Array.from({ length: n }, (_, i) => (
@@ -112,7 +124,7 @@ export default function TrendChart({ series, height = 230, formatValue = fmtAxis
             y={height - 8}
             textAnchor={i === n - 1 ? 'end' : 'middle'}
             fontSize="11"
-            fill="#8c93a4"
+            fill="var(--ls-ink-muted)"
           >
             {series[0].points[i].label}
           </text>
@@ -138,8 +150,8 @@ export default function TrendChart({ series, height = 230, formatValue = fmtAxis
             top: 22,
             left: `${tipLeft}%`,
             transform: 'translateX(-50%)',
-            background: '#fff',
-            border: '1px solid #eef0f5',
+            background: 'var(--ls-surface)',
+            border: '1px solid var(--ls-line)',
             boxShadow: '0 4px 16px rgba(15,23,42,0.08)',
             borderRadius: 8,
             padding: '8px 10px',
@@ -148,16 +160,16 @@ export default function TrendChart({ series, height = 230, formatValue = fmtAxis
             minWidth: 140
           }}
         >
-          <div style={{ color: '#8c93a4', marginBottom: 4 }}>{series[0].points[hover].period}</div>
+          <div style={{ color: 'var(--ls-ink-muted)', marginBottom: 4 }}>{series[0].points[hover].period}</div>
           {series.map((s, i) => (
             <div key={s.key || i} style={{ display: 'flex', justifyContent: 'space-between', gap: 14 }}>
-              <span style={{ color: '#5b6474' }}>{s.name}</span>
+              <span style={{ color: 'var(--ls-ink-soft)' }}>{s.name}</span>
               <span className="mono">{formatValue(at(i, hover))}</span>
             </div>
           ))}
           {series.length > 1 && (
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, marginTop: 4, paddingTop: 4, borderTop: '1px solid #f0f2f7' }}>
-              <span style={{ color: '#5b6474' }}>合计</span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, marginTop: 4, paddingTop: 4, borderTop: '1px solid var(--ls-line)' }}>
+              <span style={{ color: 'var(--ls-ink-soft)' }}>合计</span>
               <span className="mono">{formatValue(totals[hover])}</span>
             </div>
           )}
