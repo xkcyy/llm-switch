@@ -532,6 +532,136 @@ func TestChatToResponsesCustomToolCallAndReasoning(t *testing.T) {
 	}
 }
 
+// Chat 入口的 reasoning_content 必须转成 Responses 的 reasoning_text，
+// 否则思考型上游会在下一轮拒绝缺少该字段的工具调用历史。
+func TestChatToResponsesRequestKeepsReasoning(t *testing.T) {
+	body := []byte(`{
+		"model": "m",
+		"messages": [
+			{"role": "user", "content": "run"},
+			{"role": "assistant", "reasoning_content": "先分析", "tool_calls": [
+				{"id": "call_1", "type": "function", "function": {"name": "exec", "arguments": "{}"}}
+			]},
+			{"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+		]
+	}`)
+	_, out, err := Prepare(Chat, Responses, body, Identity{ProviderID: testProvider, ModelID: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req struct {
+		Input []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+	reasoningAt, callAt := -1, -1
+	for i, item := range req.Input {
+		switch item.Type {
+		case "reasoning":
+			reasoningAt = i
+			if len(item.Content) != 1 || item.Content[0].Type != "reasoning_text" || item.Content[0].Text != "先分析" {
+				t.Fatalf("reasoning_text 转换错误: %+v", item.Content)
+			}
+		case "function_call":
+			callAt = i
+		}
+	}
+	if reasoningAt < 0 || callAt < 0 || reasoningAt > callAt {
+		t.Fatalf("reasoning 条目缺失或未排在工具调用之前: %s", out)
+	}
+}
+
+// Chat 客户端带空 reasoning_content 时，工具调用历史仍需补非空 reasoning_text；
+// 否则严格路由会报 “reasoning_text ... must be passed back”。
+func TestChatToResponsesRequestFillsEmptyReasoning(t *testing.T) {
+	body := []byte(`{
+		"model": "m",
+		"messages": [
+			{"role": "assistant", "reasoning_content": "", "tool_calls": [
+				{"id": "call_1", "type": "function", "function": {"name": "exec", "arguments": "{}"}}
+			]},
+			{"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+		]
+	}`)
+	_, out, err := Prepare(Chat, Responses, body, Identity{ProviderID: testProvider, ModelID: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"type":"reasoning_text"`) ||
+		!strings.Contains(string(out), `"text":"(reasoning omitted)"`) {
+		t.Fatalf("空 reasoning_content 未补非空 reasoning_text: %s", out)
+	}
+}
+
+// Responses 上游返回的 reasoning_text 必须回填为 Chat 的 reasoning_content，
+// 客户端才能在下一轮原样带回。
+func TestResponsesToChatResponseKeepsReasoning(t *testing.T) {
+	relay, _, err := Prepare(Chat, Responses, []byte(`{"model":"m","messages":[]}`), Identity{
+		ProviderID: testProvider, ModelID: "m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{
+		"id": "resp_1", "model": "m", "status": "completed",
+		"output": [
+			{"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "先分析"}]},
+			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "完成"}]}
+		]
+	}`)
+	out, err := deliver(t, relay, string(body), "application/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Choices) != 1 || resp.Choices[0].Message.ReasoningContent != "先分析" {
+		t.Fatalf("reasoning_text 未回填到 reasoning_content: %s", out)
+	}
+}
+
+func TestStreamResponsesToChatKeepsReasoning(t *testing.T) {
+	relay, _, err := Prepare(Chat, Responses, []byte(`{"model":"m","messages":[],"stream":true}`), Identity{
+		ProviderID: testProvider, ModelID: "m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := strings.Join([]string{
+		`event: response.reasoning_text.delta`,
+		`data: {"type":"response.reasoning_text.delta","delta":"先分析"}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"完成"}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","model":"m","usage":{"input_tokens":2,"output_tokens":3}}}`,
+		``,
+	}, "\n")
+	var sb strings.Builder
+	if err := streamDeliver(t, relay, in, &sb); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sb.String(), `"reasoning_content":"先分析"`) {
+		t.Fatalf("流式 reasoning_text 未回填到 reasoning_content:\n%s", sb.String())
+	}
+}
+
 func TestStreamChatToResponsesReasoningAndCustomTool(t *testing.T) {
 	in := strings.Join([]string{
 		`data: {"id":"c1","model":"m","choices":[{"delta":{"role":"assistant","reasoning_content":"推理"}}]}`,

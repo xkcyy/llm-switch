@@ -7,6 +7,10 @@ import (
 	"strings"
 )
 
+// reasoningOmittedText 用于上游严格要求 reasoning_text 但客户端没有可回传文本的场景。
+// 仅当客户端显式携带 reasoning_content（即使为空）时使用，避免影响非思考模型。
+const reasoningOmittedText = "(reasoning omitted)"
+
 // ---- 请求：Chat → IR ----
 
 // chatDecodeRequest 把 Chat Completions 请求读成 IR。
@@ -49,6 +53,9 @@ func chatDecodeRequest(body []byte) (*irRequest, error) {
 			}
 			if reasoning == "" {
 				reasoning = m.Reasoning
+			}
+			if reasoning == "" && (m.ReasoningContent != nil || m.Reasoning != "") && len(m.ToolCalls) > 0 {
+				reasoning = reasoningOmittedText
 			}
 			if reasoning != "" {
 				req.Items = append(req.Items, irItem{Kind: "reasoning", Text: reasoning})
@@ -317,6 +324,10 @@ func chatEncodeResponse(resp *irResponse, ctx *encodeContext) ([]byte, error) {
 	if resp.Text != "" {
 		msg.Content = resp.Text
 	}
+	if resp.Reasoning != "" {
+		reasoning := resp.Reasoning
+		msg.ReasoningContent = &reasoning
+	}
 	for _, c := range resp.Calls {
 		var tc chatToolCall
 		tc.ID = c.CallID
@@ -462,6 +473,11 @@ func (e *chatStreamEncoder) Emit(ev irEvent) error {
 			return err
 		}
 		return e.chunk(map[string]any{"content": ev.Text}, nil)
+	case irReasoning:
+		if err := e.sendRole(); err != nil {
+			return err
+		}
+		return e.chunk(map[string]any{"reasoning_content": ev.Text}, nil)
 	case irCallStart:
 		e.hasCall = true
 		tc := map[string]any{

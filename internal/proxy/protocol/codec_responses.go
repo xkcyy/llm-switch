@@ -122,6 +122,10 @@ func responsesEncodeRequest(req *irRequest, model string, ctx *encodeContext) ([
 		switch it.Kind {
 		case irMessage:
 			out.Input = append(out.Input, messageItem(it.Role, it.Text, it.Images))
+		case "reasoning":
+			if it.Text != "" {
+				out.Input = append(out.Input, reasoningInputItem(it.Text))
+			}
 		case irFunctionCall:
 			out.Input = append(out.Input, map[string]any{
 				"type": "function_call", "call_id": it.CallID, "name": it.Name, "arguments": it.Arguments,
@@ -167,6 +171,10 @@ type responsesResponse struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
+		Summary []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"summary"`
 	} `json:"output"`
 	Usage *struct {
 		InputTokens  int `json:"input_tokens"`
@@ -200,6 +208,21 @@ func responsesDecodeResponse(body []byte) (*irResponse, error) {
 			resp.Calls = append(resp.Calls, irItem{
 				Kind: irFunctionCall, CallID: item.CallID, Name: item.Name, Arguments: item.Arguments,
 			})
+		case "reasoning":
+			text := ""
+			for _, c := range item.Content {
+				if c.Type == "reasoning_text" || c.Type == "text" {
+					text += c.Text
+				}
+			}
+			if text == "" {
+				for _, s := range item.Summary {
+					if s.Type == "summary_text" || s.Type == "text" {
+						text += s.Text
+					}
+				}
+			}
+			resp.Reasoning += text
 		}
 	}
 	return resp, nil
@@ -261,6 +284,15 @@ func reasoningItem(id, text string) map[string]any {
 	}
 }
 
+// reasoningInputItem 构造请求侧的 reasoning 条目。思考型 Responses 上游
+// 要求客户端把上一轮的 reasoning_text 原样带回，否则工具调用历史会被拒绝。
+func reasoningInputItem(text string) map[string]any {
+	return map[string]any{
+		"type":    "reasoning",
+		"content": []map[string]any{{"type": "reasoning_text", "text": text}},
+	}
+}
+
 // ---- 流：Responses → 事件 ----
 
 func responsesDecodeStream(r io.Reader, emit func(irEvent) error) error {
@@ -278,6 +310,8 @@ func responsesDecodeStream(r io.Reader, emit func(irEvent) error) error {
 			return emit(e)
 		case "response.output_text.delta":
 			return emit(irEvent{Kind: irText, Text: ev.Delta})
+		case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+			return emit(irEvent{Kind: irReasoning, Text: ev.Delta})
 		case "response.output_item.added":
 			if ev.Item != nil && ev.Item.Type == "function_call" {
 				return emit(irEvent{Kind: irCallStart, CallID: ev.Item.CallID, Name: ev.Item.Name})
