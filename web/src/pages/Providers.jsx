@@ -93,7 +93,7 @@ function PresetTags({ value, presets, onPick }) {
   )
 }
 
-export default function Providers() {
+export default function Providers({ navigate }) {
   const app = useApp()
   const { message } = App.useApp()
   const [selectedId, setSelectedId] = useState(app.providers[0]?.id)
@@ -140,6 +140,7 @@ export default function Providers() {
   const [modelWatched, setModelWatched] = useState({})
 
   const selected = app.providers.find((p) => p.id === selectedId) || null
+  const selectedTest = selected ? app.providerTests?.[selected.id] : null
   const presets = app.presets?.length ? app.presets : PRESETS
   const providerModels = useMemo(
     () => app.models.filter((m) => m.providerId === selected?.id && (!search || m.slug.toLowerCase().includes(search.toLowerCase()))),
@@ -243,9 +244,16 @@ export default function Providers() {
         title="供应商与模型"
         description="选择预设、粘贴 API Key，接口地址与模型信息自动补全。"
         actions={
-          <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
-            添加供应商
-          </Button>
+          <Space>
+            {app.enabledModels.length ? (
+              <Button icon={<ApiOutlined />} onClick={() => navigate('connect/codex')}>
+                接入 Agent
+              </Button>
+            ) : null}
+            <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
+              添加供应商
+            </Button>
+          </Space>
         }
       />
 
@@ -254,7 +262,7 @@ export default function Providers() {
           title="供应商"
           subtitle={`${app.providers.length} 个`}
           extra={
-            <Button size="small" type="text" icon={<PlusOutlined />} onClick={openAdd}>
+            <Button type="text" icon={<PlusOutlined />} onClick={openAdd}>
               添加
             </Button>
           }
@@ -280,7 +288,10 @@ export default function Providers() {
                     <div className="provider-item-head">
                       <div className="provider-item-main">
                         <div className="provider-name">{p.name}</div>
-                        <div className="provider-meta">
+                        <div
+                          className="provider-meta"
+                          title={`${p.id} · ${protocolLabels(p) || '—'} · ${count} 个模型`}
+                        >
                           <span className="mono">{p.id}</span> · {protocolLabels(p) || '—'} · {count} 个模型
                         </div>
                       </div>
@@ -343,7 +354,6 @@ export default function Providers() {
             extra={
               <Space>
                 <Button
-                  size="small"
                   icon={<ApiOutlined />}
                   loading={selected.testing}
                   onClick={() => app.testProvider(selected.id)}
@@ -351,7 +361,6 @@ export default function Providers() {
                   测试连接
                 </Button>
                 <Button
-                  size="small"
                   type="primary"
                   icon={<CloudDownloadOutlined />}
                   loading={syncing}
@@ -375,6 +384,24 @@ export default function Providers() {
                 </Button>
               </div>
 
+              {selectedTest ? (
+                <Alert
+                  type={selectedTest.ok ? 'success' : 'error'}
+                  showIcon
+                  message={selectedTest.ok ? '连接测试通过' : '连接测试失败'}
+                  description={
+                    selectedTest.ok
+                      ? `${selectedTest.protocol ? `${PROTOCOL_LABEL[selectedTest.protocol] || selectedTest.protocol} · ` : ''}${selectedTest.latency_ms}ms`
+                      : selectedTest.message || '检查 API Key、接口地址与协议后重试'
+                  }
+                  action={
+                    <Button size="small" loading={selected.testing} onClick={() => app.testProvider(selected.id)}>
+                      再次测试
+                    </Button>
+                  }
+                />
+              ) : null}
+
               <div className="model-toolbar">
                 <div className="model-toolbar-left">
                   <Input.Search
@@ -387,7 +414,6 @@ export default function Providers() {
                   <Text type="secondary">{providerModels.length} 个模型</Text>
                 </div>
                 <Button
-                  size="small"
                   icon={<PlusOutlined />}
                   onClick={() => {
                     const defaults = {
@@ -439,6 +465,22 @@ export default function Providers() {
                               <Tooltip title="已声明图片输入：Codex 可粘贴截图">
                                 <Tag bordered={false} color="blue">
                                   图片
+                                </Tag>
+                              </Tooltip>
+                            ) : null}
+                            {app.modelTests?.[r.slug] ? (
+                              <Tooltip
+                                title={
+                                  app.modelTests[r.slug].ok
+                                    ? `调用成功 · ${app.modelTests[r.slug].latency_ms}ms`
+                                    : app.modelTests[r.slug].message || '调用失败'
+                                }
+                              >
+                                <Tag
+                                  bordered={false}
+                                  color={app.modelTests[r.slug].ok ? 'success' : 'error'}
+                                >
+                                  {app.modelTests[r.slug].ok ? '已测通' : '失败'}
                                 </Tag>
                               </Tooltip>
                             ) : null}
@@ -649,7 +691,7 @@ export default function Providers() {
               size="small"
               rowKey="id"
               pagination={false}
-              scroll={{ x: 'max-content' }}
+              tableLayout="fixed"
               dataSource={importState.list}
               rowSelection={{
                 selectedRowKeys: importState.keys,
@@ -657,11 +699,11 @@ export default function Providers() {
                 selections: [Table.SELECTION_ALL, Table.SELECTION_INVERT]
               }}
               columns={[
-                { title: '模型 ID（上游原始）', dataIndex: 'id', width: 170, ellipsis: true, render: (v) => <Text className="mono">{v}</Text> },
+                { title: '模型 ID（上游原始）', dataIndex: 'id', width: 150, ellipsis: true, render: (v) => <Text className="mono">{v}</Text> },
                 {
                   title: '对外请求名（自动生成）',
                   dataIndex: 'id',
-                  width: 190,
+                  width: 160,
                   ellipsis: true,
                   render: (v) => (
                     <Text className="mono" type="secondary">
@@ -672,7 +714,7 @@ export default function Providers() {
                 {
                   title: '接口协议',
                   dataIndex: 'protocol',
-                  width: 100,
+                  width: 88,
                   render: (v) =>
                     v ? (
                       <Tag bordered={false} color="purple">
@@ -685,7 +727,7 @@ export default function Providers() {
                 {
                   title: '输入窗口',
                   dataIndex: 'context_window',
-                  width: 76,
+                  width: 70,
                   render: (v) =>
                     v ? (
                       <Tag bordered={false} color="blue">
@@ -698,7 +740,7 @@ export default function Providers() {
                 {
                   title: '输出窗口',
                   dataIndex: 'max_output_tokens',
-                  width: 76,
+                  width: 70,
                   render: (v) =>
                     v ? (
                       <Tag bordered={false} color="blue">
@@ -711,7 +753,7 @@ export default function Providers() {
                 {
                   title: '图片输入',
                   dataIndex: 'capabilities',
-                  width: 82,
+                  width: 68,
                   render: (v) =>
                     (v || []).includes('vision') ? (
                       <Tag bordered={false} color="blue">
@@ -724,6 +766,7 @@ export default function Providers() {
                 {
                   title: '推理档位',
                   dataIndex: 'levels',
+                  width: 100,
                   ellipsis: true,
                   render: (v) =>
                     v?.length ? (

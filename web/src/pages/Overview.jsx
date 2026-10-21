@@ -2,6 +2,7 @@ import { Alert, Badge, Button, Empty, Table, Tag, Typography } from 'antd'
 import {
   ApiOutlined,
   ArrowRightOutlined,
+  CheckOutlined,
   CheckCircleFilled,
   CloudServerOutlined,
   CodeOutlined,
@@ -9,7 +10,6 @@ import {
   NodeIndexOutlined,
   PlusOutlined,
   ReloadOutlined,
-  RobotOutlined,
   ThunderboltOutlined
 } from '@ant-design/icons'
 import { useApp } from '../store'
@@ -18,7 +18,6 @@ import PageHeader from '../components/PageHeader'
 import Panel from '../components/Panel'
 import SignalNode from '../components/SignalNode'
 import { EmptyState } from '../components/States'
-import { uiTokens } from '../theme'
 
 const { Text } = Typography
 
@@ -37,12 +36,17 @@ const relative = (iso) => {
 function NextAction({ app, navigate }) {
   const hasProvider = app.providers.length > 0
   const hasModel = app.enabledModels.length > 0
-  const hasAgent = app.codex.connected || app.opencode.connected || app.dsh.connected || app.workbuddy.connected
+  const connected = ['codex', 'opencode', 'dsh', 'workbuddy'].filter((key) => app[key]?.connected)
+  if (app.trae?.ready) connected.push('trae')
+  const hasAgent = connected.length > 0
+  const verifiedAgent = connected.find((key) => app.agentVerifications?.[key]?.ok)
+  const hasVerification = Boolean(verifiedAgent)
+  const recentFailure = (app.recentErrors || [])[0]
 
   let title = '路由已就绪'
-  let description = '代理可用模型与 Agent 接入都已配置，接下来可以直接发起调用。'
-  let label = '查看供应商与模型'
-  let target = 'providers'
+  let description = '供应商、模型、Agent 接入与链路验证均已通过，可以开始使用。'
+  let label = '查看请求轨迹'
+  let target = 'trajectory'
   let icon = <CheckCircleFilled />
 
   if (!hasProvider) {
@@ -63,10 +67,32 @@ function NextAction({ app, navigate }) {
     label = '去接入'
     target = 'connect/codex'
     icon = <ApiOutlined />
+  } else if (!hasVerification) {
+    title = '验证调用链路'
+    description = '配置已写入，但还没有经本机代理完成一次真实调用；验证通过后流程才算闭环。'
+    label = '去验证'
+    target = `connect/${connected[0]}`
+    icon = <ThunderboltOutlined />
+  } else if (!app.proxy.running) {
+    title = '本机代理已停止'
+    description = 'Agent 配置仍然存在，但当前请求无法转发；重新启动代理后再发起调用。'
+    label = '查看设置'
+    target = 'settings'
+    icon = <ReloadOutlined />
+  } else if (recentFailure) {
+    title = '最近有调用失败'
+    description = `${recentFailure.request_model || '未知模型'}：${recentFailure.error || '请求失败'}`
+    label = '排查失败请求'
+    target = 'trajectory'
+    icon = <NodeIndexOutlined />
   }
 
   return (
-    <Panel title="下一步" subtitle="按当前状态只保留一个主行动">
+    <Panel
+      className="next-action-panel"
+      title="下一步"
+      subtitle="按当前状态只保留一个主行动"
+    >
       <div className="next-action">
         <div className="next-action-icon">{icon}</div>
         <div className="next-action-copy">
@@ -79,16 +105,20 @@ function NextAction({ app, navigate }) {
       </div>
       <div className="next-action-steps">
         <div className={`next-step ${hasProvider ? 'is-done' : 'is-current'}`}>
-          <span className="next-step-index">{hasProvider ? '✓' : '1'}</span>
+          <span className="next-step-index">{hasProvider ? <CheckOutlined /> : '1'}</span>
           <span>供应商</span>
         </div>
         <div className={`next-step ${hasModel ? 'is-done' : hasProvider ? 'is-current' : ''}`}>
-          <span className="next-step-index">{hasModel ? '✓' : '2'}</span>
+          <span className="next-step-index">{hasModel ? <CheckOutlined /> : '2'}</span>
           <span>可用模型</span>
         </div>
         <div className={`next-step ${hasAgent ? 'is-done' : hasModel ? 'is-current' : ''}`}>
-          <span className="next-step-index">{hasAgent ? '✓' : '3'}</span>
+          <span className="next-step-index">{hasAgent ? <CheckOutlined /> : '3'}</span>
           <span>Agent 接入</span>
+        </div>
+        <div className={`next-step ${hasVerification ? 'is-done' : hasAgent ? 'is-current' : ''}`}>
+          <span className="next-step-index">{hasVerification ? <CheckOutlined /> : '4'}</span>
+          <span>链路验证</span>
         </div>
       </div>
     </Panel>
@@ -104,6 +134,7 @@ export default function Overview({ navigate }) {
       title: 'Codex',
       icon: <ApiOutlined />,
       connected: app.codex.connected,
+      verified: Boolean(app.agentVerifications?.codex?.ok),
       meta: app.codex.connected ? '配置已写入' : '未接入'
     },
     {
@@ -111,20 +142,15 @@ export default function Overview({ navigate }) {
       title: 'OpenCode',
       icon: <CodeOutlined />,
       connected: app.opencode.connected,
+      verified: Boolean(app.agentVerifications?.opencode?.ok),
       meta: app.opencode.connected ? '配置已写入' : '未接入'
-    },
-    {
-      key: 'trae',
-      title: 'Trae SOLO',
-      icon: <RobotOutlined />,
-      connected: Boolean(app.trae.ready || app.trae.models?.length),
-      meta: app.trae.ready ? '界面已就绪' : app.trae.installed ? '已安装，未就绪' : '未检测到'
     },
     {
       key: 'dsh',
       title: 'DeepSeek Harness',
       icon: <DeploymentUnitOutlined />,
       connected: app.dsh.connected,
+      verified: Boolean(app.agentVerifications?.dsh?.ok),
       meta: app.dsh.connected ? `profile · ${app.dsh.profile}` : '未接入'
     },
     {
@@ -132,13 +158,13 @@ export default function Overview({ navigate }) {
       title: 'WorkBuddy',
       icon: <ThunderboltOutlined />,
       connected: app.workbuddy.connected,
+      verified: Boolean(app.agentVerifications?.workbuddy?.ok),
       meta: app.workbuddy.connected ? 'models.json 已同步' : '未接入'
     }
   ]
 
-  const connectedAgents = agents.filter((agent) => agent.connected).length
-  const visibleProviders = app.providers.slice(0, 5)
-  const remainingProviders = Math.max(0, app.providers.length - visibleProviders.length)
+  const verifiedAgents = agents.filter((agent) => agent.verified).length
+  const visibleProviders = app.providers.slice(0, 4)
 
   const requests = (app.recent || []).map((request, index) => ({
     key: index,
@@ -169,93 +195,6 @@ export default function Overview({ navigate }) {
         }
       />
 
-      {app.repairs?.length > 0 ? (
-        <Alert
-          type="warning"
-          showIcon
-          message={`已自动修复 ${app.repairs.length} 项配置问题`}
-          description={
-            <ul className="plain-list">
-              {app.repairs.map((repair, index) => (
-                <li key={index}>{repair.detail}</li>
-              ))}
-            </ul>
-          }
-        />
-      ) : null}
-
-      <div className="overview-top">
-        <Panel
-          title="信号路由"
-          subtitle="Agent 请求经本机代理转发到已启用的供应商模型"
-          extra={<Text type="secondary">{connectedAgents} / {agents.length} Agent 已接入</Text>}
-        >
-          <div className="signal-board">
-            <div className="signal-column">
-              <div className="signal-column-title">Agent 端口</div>
-              {agents.map((agent) => (
-                <div key={agent.key} onClick={() => navigate(`connect/${agent.key}`)} style={{ cursor: 'pointer' }}>
-                  <SignalNode
-                    title={agent.title}
-                    meta={agent.meta}
-                    icon={agent.icon}
-                    active={agent.connected}
-                    muted={!agent.connected}
-                    status={agent.connected ? 'success' : 'default'}
-                  />
-                </div>
-              ))}
-            </div>
-
-            <div className="signal-core">
-              <div className={`signal-core-box ${app.proxy.running ? 'is-running' : ''}`}>
-                <div className="signal-core-label">本机代理</div>
-                <div className="signal-core-value">{app.proxy.running ? '运行中' : '已停止'}</div>
-                <div className="signal-core-port">
-                  {app.proxy.host}:{app.proxy.port}
-                </div>
-              </div>
-              <Text type="secondary" className="text-xs">
-                {app.enabledModels.length} 个可用模型
-              </Text>
-            </div>
-
-            <div className="signal-column">
-              <div className="signal-column-title">供应商节点</div>
-              {visibleProviders.length ? (
-                visibleProviders.map((provider) => (
-                  <div key={provider.id} onClick={() => navigate('providers')} style={{ cursor: 'pointer' }}>
-                    <SignalNode
-                      title={provider.name}
-                      meta={`${provider.modelCount} 个模型 · ${provider.enabled ? '已启用' : '已停用'}`}
-                      icon={<CloudServerOutlined />}
-                      active={provider.enabled}
-                      muted={!provider.enabled}
-                      status={provider.enabled ? 'success' : 'default'}
-                    />
-                  </div>
-                ))
-              ) : (
-                <EmptyState
-                  title="还没有供应商"
-                  description="先添加一个供应商，代理才可转发模型请求。"
-                  actionLabel="添加供应商"
-                  onAction={() => navigate('providers')}
-                />
-              )}
-              {remainingProviders > 0 ? (
-                <button className="signal-more" onClick={() => navigate('providers')}>
-                  还有 {remainingProviders} 个供应商
-                  <ArrowRightOutlined />
-                </button>
-              ) : null}
-            </div>
-          </div>
-        </Panel>
-
-        <NextAction app={app} navigate={navigate} />
-      </div>
-
       <div className="metric-strip">
         <div className="metric-strip-item">
           <div className="metric-strip-label">今日调用</div>
@@ -283,6 +222,120 @@ export default function Overview({ navigate }) {
         </div>
       </div>
 
+      <div className="overview-workbench">
+        <Panel
+          className="route-panel"
+          title="信号路由"
+          subtitle="Agent 请求经本机代理转发到已启用的供应商模型"
+          extra={<Text type="secondary">{verifiedAgents} / {agents.length} 链路已验证</Text>}
+        >
+        <div className="signal-board">
+          <div className="signal-column">
+            <div className="signal-column-title">
+              <span>Agent 接入</span>
+              <span className="signal-column-count">{agents.length}</span>
+            </div>
+            {agents.map((agent) => (
+              <button
+                type="button"
+                key={agent.key}
+                className="signal-node-action"
+                onClick={() => navigate(`connect/${agent.key}`)}
+              >
+                <SignalNode
+                  title={agent.title}
+                  meta={agent.verified ? `${agent.meta} · 已验证` : agent.meta}
+                  icon={agent.icon}
+                  active={agent.verified}
+                  muted={!agent.connected}
+                  status={agent.verified ? 'success' : agent.connected ? 'warning' : 'default'}
+                />
+              </button>
+            ))}
+          </div>
+
+          <div className="signal-core">
+            <div className={`signal-core-box ${app.proxy.running ? 'is-running' : ''}`}>
+              <div className="signal-core-label">本机代理</div>
+              <div className="signal-core-value">{app.proxy.running ? '运行中' : '已停止'}</div>
+              <div className="signal-core-port">
+                {app.proxy.host}:{app.proxy.port}
+              </div>
+              <div className="signal-core-meta">{app.enabledModels.length} 个可用模型</div>
+            </div>
+          </div>
+
+          <div className="signal-column">
+            <div className="signal-column-title">
+              <span>供应商节点</span>
+              <span className="signal-column-count">{app.providers.length}</span>
+            </div>
+            {visibleProviders.length ? (
+              visibleProviders.map((provider) => (
+                <button
+                  type="button"
+                  key={provider.id}
+                  className="signal-node-action"
+                  onClick={() => navigate('providers')}
+                >
+                  <SignalNode
+                    title={provider.name}
+                    meta={`${provider.modelCount} 个模型 · ${provider.enabled ? '已启用' : '已停用'}`}
+                    icon={<CloudServerOutlined />}
+                    active={provider.enabled}
+                    muted={!provider.enabled}
+                    status={provider.enabled ? 'success' : 'default'}
+                  />
+                </button>
+              ))
+            ) : (
+              <EmptyState
+                title="还没有供应商"
+                description="先添加一个供应商，代理才可转发模型请求。"
+                actionLabel="添加供应商"
+                onAction={() => navigate('providers')}
+              />
+            )}
+          </div>
+        </div>
+        </Panel>
+
+        <NextAction app={app} navigate={navigate} />
+      </div>
+
+      {app.repairs?.length > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          message={`已自动修复 ${app.repairs.length} 项配置问题`}
+          description={
+            <ul className="plain-list">
+              {app.repairs.map((repair, index) => (
+                <li key={index}>{repair.detail}</li>
+              ))}
+            </ul>
+          }
+        />
+      ) : null}
+
+      {app.recentErrors?.length > 0 ? (
+        <Alert
+          type="error"
+          showIcon
+          message={`最近有 ${app.recentErrors.length} 次调用失败`}
+          description={
+            <span>
+              {app.recentErrors[0].request_model || '未知模型'} · {app.recentErrors[0].error || '请求失败'}
+            </span>
+          }
+          action={
+            <Button size="small" onClick={() => navigate('trajectory')}>
+              排查
+            </Button>
+          }
+        />
+      ) : null}
+
       <Panel
         title="最近调用"
         subtitle="最近入站请求及其转发结果"
@@ -296,6 +349,7 @@ export default function Overview({ navigate }) {
         <Table
           size="small"
           pagination={false}
+          scroll={{ x: 760 }}
           dataSource={requests}
           locale={{
             emptyText: (

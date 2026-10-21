@@ -6,10 +6,13 @@ import {
   CloudServerOutlined,
   DashboardOutlined,
   FolderOpenOutlined,
+  MenuFoldOutlined,
   MenuOutlined,
+  MenuUnfoldOutlined,
   NodeIndexOutlined,
   ReloadOutlined,
-  SettingOutlined
+  SettingOutlined,
+  ThunderboltOutlined
 } from '@ant-design/icons'
 import { AppStoreProvider, useApp } from './store'
 import { LoadingState } from './components/States'
@@ -23,6 +26,7 @@ const DshPage = lazy(() => import('./pages/Dsh'))
 const WorkBuddyPage = lazy(() => import('./pages/WorkBuddy'))
 const SettingsPage = lazy(() => import('./pages/Settings'))
 const Usage = lazy(() => import('./pages/Usage'))
+const Monitoring = lazy(() => import('./pages/Monitoring'))
 const Trajectory = lazy(() => import('./pages/Trajectory'))
 
 const { Sider, Header, Content } = Layout
@@ -47,6 +51,7 @@ const NAV_GROUPS = [
     label: '观测',
     items: [
       { key: 'usage', icon: <BarChartOutlined />, label: '用量' },
+      { key: 'monitoring', icon: <ThunderboltOutlined />, label: '性能与可用性' },
       { key: 'trajectory', icon: <NodeIndexOutlined />, label: '请求轨迹' }
     ]
   }
@@ -76,6 +81,41 @@ function routeTitle(route) {
 
 function navKey(route) {
   return route.page === 'connect' ? 'connect' : route.page
+}
+
+function agentStatus(app, key) {
+  if (key === 'codex') return app.codex.connected
+  if (key === 'opencode') return app.opencode.connected
+  if (key === 'dsh') return app.dsh.connected
+  if (key === 'workbuddy') return app.workbuddy.connected
+  if (key === 'trae') return app.trae.ready
+  return false
+}
+
+function ConnectAgentTabs({ route, navigate, app }) {
+  return (
+    <nav className="agent-switch" aria-label="选择 Agent" role="tablist">
+      {Object.entries(AGENTS).map(([key, agent]) => {
+        const connected = agentStatus(app, key)
+        const verification = app.agentVerifications?.[key]
+        const statusClass = verification?.ok ? 'is-ok' : connected ? 'is-ready' : 'is-idle'
+        const active = route.agent === key
+        return (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={active}
+            className={`agent-switch-item${active ? ' is-active' : ''}`}
+            key={key}
+            onClick={() => navigate(`connect/${key}`)}
+          >
+            <span className={`agent-tab-dot ${statusClass}`} />
+            <span>{agent.label}</span>
+          </button>
+        )
+      })}
+    </nav>
+  )
 }
 
 function RailNav({ route, navigate, collapsed = false }) {
@@ -141,6 +181,7 @@ function Shell() {
         overview: Overview,
         providers: Providers,
         usage: Usage,
+        monitoring: Monitoring,
         trajectory: Trajectory,
         settings: SettingsPage
       }[route.page] || Overview
@@ -191,10 +232,6 @@ function Shell() {
               <FolderOpenOutlined />
               <span className="sider-action-label">配置目录</span>
             </button>
-            <button className="sider-action" onClick={() => setCollapsed((value) => !value)}>
-              <ApiOutlined />
-              <span className="sider-action-label">{collapsed ? '展开导航' : '收起导航'}</span>
-            </button>
             <div className="sider-version">v{app.settings.version || 'dev'} · 本地运行</div>
           </div>
         </Sider>
@@ -203,15 +240,23 @@ function Shell() {
       <Layout className="app-main">
         <Header className="app-header">
           <div className="topbar-left">
-            {mobile ? (
+            <Tooltip title={mobile ? '打开导航' : collapsed ? '展开导航' : '收起导航'}>
               <Button
                 className="topbar-menu"
                 type="text"
-                icon={<MenuOutlined />}
-                onClick={() => setNavOpen(true)}
-                aria-label="打开导航"
+                icon={
+                  mobile ? (
+                    <MenuOutlined />
+                  ) : collapsed ? (
+                    <MenuUnfoldOutlined />
+                  ) : (
+                    <MenuFoldOutlined />
+                  )
+                }
+                onClick={() => (mobile ? setNavOpen(true) : setCollapsed((value) => !value))}
+                aria-label={mobile ? '打开导航' : collapsed ? '展开导航' : '收起导航'}
               />
-            ) : null}
+            </Tooltip>
             <span className="breadcrumb-text">LLM Switch / {routeTitle(route)}</span>
           </div>
           <div className="topbar-right">
@@ -238,9 +283,14 @@ function Shell() {
         <Content className="app-content">
           <div className="page-wrap">
             {app.ready ? (
-              <Suspense fallback={<LoadingState rows={8} />}>
-                <Page route={route} navigate={navigate} />
-              </Suspense>
+              <>
+                {route.page === 'connect' ? (
+                  <ConnectAgentTabs route={route} navigate={navigate} app={app} />
+                ) : null}
+                <Suspense fallback={<LoadingState rows={8} />}>
+                  <Page route={route} navigate={navigate} />
+                </Suspense>
+              </>
             ) : (
               <LoadingState rows={8} />
             )}

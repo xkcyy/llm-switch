@@ -178,7 +178,9 @@ export function AppStoreProvider({ children }) {
   const [ready, setReady] = useState(false)
   const [proxy, setProxyState] = useState({ running: false, host: '127.0.0.1', port: 8317 })
   const [providers, setProviders] = useState([])
+  const [providerTests, setProviderTests] = useState({})
   const [models, setModels] = useState([])
+  const [modelTests, setModelTests] = useState({})
   const [defaultModel, setDefaultModelState] = useState('')
   const [codex, setCodexState] = useState({ connected: false, autoSync: true, baseUrl: '', configPath: '', catalogPath: '', lastSync: null })
   const [opencode, setOpenCodeState] = useState({
@@ -245,9 +247,11 @@ export function AppStoreProvider({ children }) {
   })
   const [settings, setSettingsState] = useState({ autoStart: false, openPanelOnStart: true, logLevel: 'info', keepLogDays: 7, traceEnabled: true, configDir: '' })
   const [recent, setRecent] = useState([])
+  const [recentErrors, setRecentErrors] = useState([])
   const [usage, setUsage] = useState({ total: null, today: null })
   const [repairs, setRepairs] = useState([])
   const [presets, setPresets] = useState(PRESETS)
+  const [agentVerifications, setAgentVerifications] = useState({})
 
   const refreshModels = async (providerList) => {
     const list = providerList || providers
@@ -302,7 +306,9 @@ export function AppStoreProvider({ children }) {
       setProxyState(ov.proxy)
       setDefaultModelState(ov.default_model || '')
       setRecent(ov.recent_requests || [])
+      setRecentErrors(ov.recent_errors || [])
       setRepairs(ov.repairs || [])
+      setAgentVerifications(ov.agent_verifications || {})
     }
     if (cx) setCodexState(mapCodex(cx))
     if (oc) setOpenCodeState(mapOpenCode(oc))
@@ -345,6 +351,26 @@ export function AppStoreProvider({ children }) {
       .finally(() => setReady(true))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const clearAgentVerification = (agent) => {
+    setAgentVerifications((prev) => {
+      if (!(agent in prev)) return prev
+      const next = { ...prev }
+      delete next[agent]
+      return next
+    })
+  }
+
+  const runAgentVerification = async (agent) => {
+    let result
+    try {
+      result = await Api.agents.test(agent)
+    } catch (error) {
+      result = { ok: false, message: error.message || '验证请求失败' }
+    }
+    setAgentVerifications((prev) => ({ ...prev, [agent]: result }))
+    return result
+  }
 
   const actions = useMemo(
     () => ({
@@ -399,23 +425,30 @@ export function AppStoreProvider({ children }) {
         await Api.providers.remove(id)
         setProviders((prev) => prev.filter((p) => p.id !== id))
         setModels((prev) => prev.filter((m) => m.providerId !== id))
+        setProviderTests((prev) => {
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
         await refreshDefaultModel()
         message.success('供应商已删除')
       },
 
       async testProvider(id) {
         setProviders((prev) => prev.map((p) => (p.id === id ? { ...p, testing: true } : p)))
+        let result
         try {
-          const res = await Api.providers.test(id)
-          if (res.ok) message.success(`连接正常${res.protocol ? ` · ${res.protocol}` : ''} · ${res.latency_ms}ms`)
-          else message.error(res.message || '连接失败')
-          return res
+          result = await Api.providers.test(id)
+          if (result.ok) message.success(`连接正常${result.protocol ? ` · ${result.protocol}` : ''} · ${result.latency_ms}ms`)
+          else message.error(result.message || '连接失败')
         } catch (e) {
-          message.error(e.message)
-          return { ok: false, message: e.message }
+          result = { ok: false, message: e.message }
+          message.error(result.message)
         } finally {
+          setProviderTests((prev) => ({ ...prev, [id]: result }))
           setProviders((prev) => prev.map((p) => (p.id === id ? { ...p, testing: false } : p)))
         }
+        return result
       },
 
       async fetchRemoteModels(providerId) {
@@ -465,6 +498,11 @@ export function AppStoreProvider({ children }) {
         if (!m) return
         await Api.models.remove(m.providerId, m.id)
         setModels((prev) => prev.filter((x) => x.id !== id))
+        setModelTests((prev) => {
+          const next = { ...prev }
+          delete next[m.slug]
+          return next
+        })
         await refreshDefaultModel()
         message.success('模型已删除')
       },
@@ -472,15 +510,17 @@ export function AppStoreProvider({ children }) {
       async testModel(id) {
         const m = models.find((x) => x.id === id)
         if (!m) return { ok: false, message: '模型不存在' }
+        let result
         try {
-          const res = await Api.models.test(m.providerId, m.id)
-          if (res.ok) message.success(`调用成功 · ${res.latency_ms}ms`)
-          else message.error(res.message || '调用失败')
-          return res
+          result = await Api.models.test(m.providerId, m.id)
+          if (result.ok) message.success(`调用成功 · ${result.latency_ms}ms`)
+          else message.error(result.message || '调用失败')
         } catch (e) {
-          message.error(e.message)
-          return { ok: false, message: e.message }
+          result = { ok: false, message: e.message }
+          message.error(result.message)
         }
+        setModelTests((prev) => ({ ...prev, [m.slug]: result }))
+        return result
       },
 
       async saveModel(providerId, values, editId) {
@@ -502,17 +542,29 @@ export function AppStoreProvider({ children }) {
         }
         await refreshModels()
         await refreshDefaultModel()
+        setModelTests((prev) => {
+          const next = { ...prev }
+          if (editId) delete next[`${providerId}/${editId}`]
+          return next
+        })
         message.success(editId ? '模型已更新' : '模型已添加')
       },
 
       async connectCodex() {
+        clearAgentVerification('codex')
         await Api.codex.sync({})
         const cx = await Api.codex.status()
         setCodexState(mapCodex(cx))
-        message.success('已接入 Codex')
+        const verified = await runAgentVerification('codex').catch((error) => ({
+          ok: false,
+          message: error.message
+        }))
+        if (verified.ok) message.success('已接入 Codex，链路验证通过')
+        else message.warning(`已接入 Codex，但链路验证失败：${verified.message}`, 8)
       },
 
       async syncCodex(overrides = {}) {
+        clearAgentVerification('codex')
         const res = await Api.codex.sync(overrides)
         const cx = await Api.codex.status()
         setCodexState(mapCodex(cx))
@@ -521,6 +573,7 @@ export function AppStoreProvider({ children }) {
       },
 
       async disconnectCodex() {
+        clearAgentVerification('codex')
         await Api.codex.disconnect()
         const cx = await Api.codex.status()
         setCodexState(mapCodex(cx))
@@ -528,13 +581,20 @@ export function AppStoreProvider({ children }) {
       },
 
       async connectOpenCode() {
+        clearAgentVerification('opencode')
         await Api.opencode.sync({})
         const st = await Api.opencode.status()
         setOpenCodeState(mapOpenCode(st))
-        message.success('已接入 OpenCode')
+        const verified = await runAgentVerification('opencode').catch((error) => ({
+          ok: false,
+          message: error.message
+        }))
+        if (verified.ok) message.success('已接入 OpenCode，链路验证通过')
+        else message.warning(`已接入 OpenCode，但链路验证失败：${verified.message}`, 8)
       },
 
       async syncOpenCode(overrides = {}) {
+        clearAgentVerification('opencode')
         const res = await Api.opencode.sync(overrides)
         const st = await Api.opencode.status()
         setOpenCodeState(mapOpenCode(st))
@@ -543,6 +603,7 @@ export function AppStoreProvider({ children }) {
       },
 
       async disconnectOpenCode() {
+        clearAgentVerification('opencode')
         await Api.opencode.disconnect()
         const st = await Api.opencode.status()
         setOpenCodeState(mapOpenCode(st))
@@ -550,12 +611,14 @@ export function AppStoreProvider({ children }) {
       },
 
       async syncTrae() {
+        clearAgentVerification('trae')
         await Api.trae.sync()
         const st = await Api.trae.status()
         setTraeState(mapTrae(st))
       },
 
       async reorderTrae() {
+        clearAgentVerification('trae')
         await Api.trae.reorder()
         const st = await Api.trae.status()
         setTraeState(mapTrae(st))
@@ -585,13 +648,20 @@ export function AppStoreProvider({ children }) {
       },
 
       async connectDsh() {
+        clearAgentVerification('dsh')
         await Api.dsh.sync({})
         const st = await Api.dsh.status()
         setDshState(mapDsh(st))
-        message.success('已接入 DeepSeek Harness')
+        const verified = await runAgentVerification('dsh').catch((error) => ({
+          ok: false,
+          message: error.message
+        }))
+        if (verified.ok) message.success('已接入 DeepSeek Harness，链路验证通过')
+        else message.warning(`已接入 DeepSeek Harness，但链路验证失败：${verified.message}`, 8)
       },
 
       async syncDsh(overrides = {}) {
+        clearAgentVerification('dsh')
         const res = await Api.dsh.sync(overrides)
         const st = await Api.dsh.status()
         setDshState(mapDsh(st))
@@ -600,6 +670,7 @@ export function AppStoreProvider({ children }) {
       },
 
       async disconnectDsh() {
+        clearAgentVerification('dsh')
         await Api.dsh.disconnect()
         const st = await Api.dsh.status()
         setDshState(mapDsh(st))
@@ -622,13 +693,20 @@ export function AppStoreProvider({ children }) {
       },
 
       async connectWorkBuddy() {
+        clearAgentVerification('workbuddy')
         await Api.workbuddy.sync({})
         const st = await Api.workbuddy.status()
         setWorkBuddyState(mapWorkBuddy(st))
-        message.success('已接入 WorkBuddy')
+        const verified = await runAgentVerification('workbuddy').catch((error) => ({
+          ok: false,
+          message: error.message
+        }))
+        if (verified.ok) message.success('已接入 WorkBuddy，链路验证通过')
+        else message.warning(`已接入 WorkBuddy，但链路验证失败：${verified.message}`, 8)
       },
 
       async syncWorkBuddy(overrides = {}) {
+        clearAgentVerification('workbuddy')
         const res = await Api.workbuddy.sync(overrides)
         const st = await Api.workbuddy.status()
         setWorkBuddyState(mapWorkBuddy(st))
@@ -637,6 +715,7 @@ export function AppStoreProvider({ children }) {
       },
 
       async disconnectWorkBuddy() {
+        clearAgentVerification('workbuddy')
         await Api.workbuddy.disconnect()
         const st = await Api.workbuddy.status()
         setWorkBuddyState(mapWorkBuddy(st))
@@ -715,6 +794,10 @@ export function AppStoreProvider({ children }) {
         await Api.system.openLogDir()
       },
 
+      async verifyAgent(agent) {
+        return runAgentVerification(agent)
+      },
+
       async revealProviderKey(id) {
         return Api.providers.secret(id)
       }
@@ -728,9 +811,12 @@ export function AppStoreProvider({ children }) {
     ready,
     proxy,
     providers,
+    providerTests,
     models,
+    modelTests,
     enabledModels,
     defaultModel,
+    agentVerifications,
     codex,
     opencode,
     trae,
@@ -738,6 +824,7 @@ export function AppStoreProvider({ children }) {
     workbuddy,
     settings,
     recent,
+    recentErrors,
     usage,
     repairs,
     presets,

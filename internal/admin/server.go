@@ -16,6 +16,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"llm-switch/internal/buildinfo"
@@ -51,12 +52,16 @@ type Server struct {
 	http    *http.Server
 	ln      net.Listener
 	running bool
+
+	verifyMu      sync.Mutex
+	verifications map[string]AgentVerification
 }
 
 func New(store *config.Store, prov *provider.Service, px *proxy.Server, cx *codex.Service, oc *opencode.Service, tr *trae.Service, ds *dsh.Service, wb *workbuddy.Service, webFS fs.FS, logDir string, onAutoStart func(bool) error) *Server {
 	return &Server{
 		store: store, providers: prov, proxy: px, codex: cx, opencode: oc, trae: tr, dsh: ds, workbuddy: wb,
 		token: randomToken(), webFS: webFS, logDir: logDir, onAutoStart: onAutoStart,
+		verifications: map[string]AgentVerification{},
 	}
 }
 
@@ -155,6 +160,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/usage", s.handleUsage)
 	mux.HandleFunc("GET /api/usage/report", s.handleUsageReport)
+	mux.HandleFunc("GET /api/metrics/report", s.handleMetricsReport)
 
 	mux.HandleFunc("GET /api/trajectory", s.handleTrajectoryList)
 	mux.HandleFunc("GET /api/trajectory/{id}", s.handleTrajectoryDetail)
@@ -208,6 +214,8 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/workbuddy/sync", s.handleWorkBuddySync)
 	mux.HandleFunc("POST /api/workbuddy/disconnect", s.handleWorkBuddyDisconnect)
 
+	mux.HandleFunc("POST /api/agents/{agent}/test", s.handleAgentTest)
+
 	mux.HandleFunc("GET /api/settings", s.handleSettingsGet)
 	mux.HandleFunc("PUT /api/settings", s.handleSettingsUpdate)
 	mux.HandleFunc("POST /api/system/open-config-dir", s.handleOpenConfigDir)
@@ -236,10 +244,11 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			"connected": s.dsh.Connected(cfg.Settings.DshProfile), "auto_sync": cfg.Settings.DshAutoSync,
 			"profile": cfg.Settings.DshProfile, "config_path": dsh.ResolvePaths(cfg.Settings.DshProfile).Patch,
 		},
-		"default_model":   cfg.Settings.DefaultModel,
-		"recent_requests": s.proxy.Recent(8),
-		"recent_errors":   s.proxy.RecentErrors(5),
-		"repairs":         s.store.LastRepairs(),
+		"default_model":       cfg.Settings.DefaultModel,
+		"recent_requests":     s.proxy.Recent(8),
+		"recent_errors":       s.proxy.RecentErrors(5),
+		"repairs":             s.store.LastRepairs(),
+		"agent_verifications": s.verificationSnapshot(),
 	})
 }
 
@@ -286,7 +295,7 @@ func (s *Server) handleTrajectoryDetail(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleTrajectoryRaw 返回单条请求的原始入站请求体。
+// handleTrajectoryRaw 返回单条请求的原始入站请求体与上游响应体。
 func (s *Server) handleTrajectoryRaw(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {
@@ -298,9 +307,21 @@ func (s *Server) handleTrajectoryRaw(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "轨迹记录不存在或已被覆盖"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"entry": entry, "headers": entry.Headers, "body": string(entry.Body),
-	})
+		"response": nil,
+	}
+	if entry.Response != nil {
+		resp["response"] = map[string]any{
+			"status":    entry.Response.Status,
+			"proto":     entry.Response.Proto,
+			"bytes":     entry.Response.Bytes,
+			"truncated": entry.Response.Truncated,
+			"headers":   entry.Response.Headers,
+			"body":      string(entry.Response.Body),
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleUsage 返回累计与今日的用量合计。时间粒度与分组查询在后续迭代补齐。
@@ -365,6 +386,98 @@ func (s *Server) handleUsageReport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleMetricsReport 返回性能与可用性报表：供应商/模型的时间序列与派生指标。
+func (s *Server) handleMetricsReport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	now := time.Now()
+	loc := now.Location()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	span := q.Get("range")
+	if span == "" {
+		span = "90m"
+	}
+
+	from, to := now.Truncate(time.Minute).Add(-89*time.Minute), now.Truncate(time.Minute)
+	gran := usage.GranMinute
+	switch span {
+	case "24h":
+		to = now.Truncate(time.Hour)
+		from, gran = to.Add(-23*time.Hour), usage.GranHour
+	case "today":
+		from, to, gran = today, today.Add(23*time.Hour), usage.GranHour
+	case "7d":
+		from, to, gran = today.AddDate(0, 0, -6), today, usage.GranDay
+	case "30d":
+		from, to, gran = today.AddDate(0, 0, -29), today, usage.GranDay
+	case "all":
+		from, to, gran = today.AddDate(0, 0, -89), today, usage.GranDay
+		if earliest, ok := s.proxy.Usage().EarliestDay(); ok {
+			if parsed, err := time.ParseInLocation("2006-01-02", earliest, loc); err == nil {
+				from = parsed
+			}
+		}
+	case "custom":
+		f, errF := time.ParseInLocation("2006-01-02", q.Get("from"), loc)
+		t, errT := time.ParseInLocation("2006-01-02", q.Get("to"), loc)
+		if errF != nil || errT != nil || t.Before(f) {
+			f, t = today.AddDate(0, 0, -6), today
+		}
+		days := int(t.Sub(f)/(24*time.Hour)) + 1
+		from, to = f, t.Add(24*time.Hour-time.Minute)
+		switch {
+		case days > 30:
+			gran = usage.GranMonth
+			from = time.Date(from.Year(), from.Month(), 1, 0, 0, 0, 0, loc)
+		case days > 1:
+			gran = usage.GranDay
+		default:
+			gran = usage.GranHour
+		}
+	}
+
+	group := q.Get("group")
+	if group == "" {
+		group = usage.GroupProvider
+	}
+	res := s.proxy.Usage().Query(usage.Query{
+		From: from, To: to, Granularity: gran, Group: group,
+		ProviderID: q.Get("provider"), ModelID: q.Get("model"), Caller: q.Get("caller"),
+	})
+
+	type point struct {
+		Period string `json:"period"`
+		Group  string `json:"group,omitempty"`
+		usage.Totals
+		Metrics usage.Metrics `json:"metrics"`
+	}
+	type row struct {
+		usage.GroupRow
+		Metrics usage.Metrics `json:"metrics"`
+	}
+	series := make([]point, 0)
+	for _, p := range fillSeries(res.Series, res.Groups, from, to, gran) {
+		series = append(series, point{Period: p.Period, Group: p.Group, Totals: p.Totals, Metrics: p.Totals.Derive()})
+	}
+	groups := make([]row, 0, len(res.Groups))
+	for _, g := range res.Groups {
+		groups = append(groups, row{GroupRow: g, Metrics: g.Totals.Derive()})
+	}
+
+	layout := "2006-01-02"
+	if gran == usage.GranMinute {
+		layout = "2006-01-02T15:04"
+	} else if gran == usage.GranHour {
+		layout = "2006-01-02T15"
+	}
+	writeJSON(w, 200, map[string]any{
+		"range": span, "granularity": gran, "group": group,
+		"from": from.Format(layout), "to": to.Format(layout),
+		"totals":  res.Totals,
+		"summary": res.Totals.Derive(),
+		"series":  series, "groups": groups,
+	})
+}
+
 // fillSeries 把没有数据的时段补成 0，并为每个分组各生成一条序列。
 func fillSeries(points []usage.SeriesPoint, groups []usage.GroupRow, from, to time.Time, gran string) []usage.SeriesPoint {
 	byKey := make(map[[2]string]usage.Totals, len(points))
@@ -385,9 +498,13 @@ func fillSeries(points []usage.SeriesPoint, groups []usage.GroupRow, from, to ti
 		}
 	}
 	switch gran {
+	case usage.GranMinute:
+		for t := from; !t.After(to); t = t.Add(time.Minute) {
+			add(t.Format("2006-01-02T15:04"))
+		}
 	case usage.GranHour:
-		for h := 0; h < 24; h++ {
-			add(from.Add(time.Duration(h) * time.Hour).Format("2006-01-02T15"))
+		for t := from; !t.After(to); t = t.Add(time.Hour) {
+			add(t.Format("2006-01-02T15"))
 		}
 	case usage.GranMonth:
 		for m := from; !m.After(to); m = m.AddDate(0, 1, 0) {
@@ -762,6 +879,7 @@ func (s *Server) handleCodexAuto(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCodexSync(w http.ResponseWriter, r *http.Request) {
+	defer s.clearAgentVerification("codex")
 	var ov codex.Overrides
 	if err := readJSON(r, &ov); err != nil {
 		apiErr(w, 400, err.Error())
@@ -794,6 +912,7 @@ func (s *Server) handleCodexSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCodexDisconnect(w http.ResponseWriter, r *http.Request) {
+	defer s.clearAgentVerification("codex")
 	if err := s.codex.Disconnect(); err != nil {
 		apiErr(w, 500, err.Error())
 		return
@@ -857,6 +976,7 @@ func (s *Server) handleOpenCodeShape(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOpenCodeSync(w http.ResponseWriter, r *http.Request) {
+	defer s.clearAgentVerification("opencode")
 	var ov opencode.Overrides
 	if err := readJSON(r, &ov); err != nil {
 		apiErr(w, 400, err.Error())
@@ -878,6 +998,7 @@ func (s *Server) handleOpenCodeSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOpenCodeDisconnect(w http.ResponseWriter, r *http.Request) {
+	defer s.clearAgentVerification("opencode")
 	if err := s.opencode.Disconnect(); err != nil {
 		apiErr(w, 500, err.Error())
 		return
@@ -898,6 +1019,7 @@ func (s *Server) handleTraeProgress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTraeSync(w http.ResponseWriter, r *http.Request) {
+	defer s.clearAgentVerification("trae")
 	if err := s.trae.StartSync(); err != nil {
 		apiErr(w, 409, err.Error())
 		return
@@ -906,6 +1028,7 @@ func (s *Server) handleTraeSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTraeReorder(w http.ResponseWriter, r *http.Request) {
+	defer s.clearAgentVerification("trae")
 	if err := s.trae.StartReorder(); err != nil {
 		apiErr(w, 409, err.Error())
 		return
@@ -975,6 +1098,7 @@ func (s *Server) handleDshProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDshSync(w http.ResponseWriter, r *http.Request) {
+	defer s.clearAgentVerification("dsh")
 	var ov dsh.Overrides
 	if err := readJSON(r, &ov); err != nil {
 		apiErr(w, 400, err.Error())
@@ -1002,6 +1126,7 @@ func (s *Server) handleDshSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDshDisconnect(w http.ResponseWriter, r *http.Request) {
+	defer s.clearAgentVerification("dsh")
 	cfg := s.store.Snapshot()
 	if err := s.dsh.Disconnect(cfg.Settings.DshProfile); err != nil {
 		apiErr(w, 500, err.Error())
@@ -1038,6 +1163,7 @@ func (s *Server) handleWorkBuddyAuto(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkBuddySync(w http.ResponseWriter, r *http.Request) {
+	defer s.clearAgentVerification("workbuddy")
 	var ov workbuddy.Overrides
 	if err := readJSON(r, &ov); err != nil {
 		apiErr(w, 400, err.Error())
@@ -1059,6 +1185,7 @@ func (s *Server) handleWorkBuddySync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkBuddyDisconnect(w http.ResponseWriter, r *http.Request) {
+	defer s.clearAgentVerification("workbuddy")
 	if err := s.workbuddy.Disconnect(); err != nil {
 		apiErr(w, 500, err.Error())
 		return

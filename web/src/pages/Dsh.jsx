@@ -62,12 +62,7 @@ export default function DshPage() {
   }
 
   const test = () => {
-    const target = app.models.find((model) => model.slug === app.defaultModel) || app.enabledModels[0]
-    if (!target) {
-      message.warning('还没有可用模型')
-      return
-    }
-    app.testModel(target.id)
+    return app.verifyAgent('dsh')
   }
 
   const profileSelect = (
@@ -152,6 +147,7 @@ export default function DshPage() {
         onSync={sync}
         syncing={syncing}
         onTest={test}
+        verification={app.agentVerifications?.dsh}
         onDisconnect={app.disconnectDsh}
         disconnectTitle="断开 DeepSeek Harness 接入？"
         disconnectDescription="只移除 LLM Switch 写入的 providers.llm-switch 段，不影响你其他的 dsh 设置。"

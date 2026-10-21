@@ -56,7 +56,7 @@ export default function TrendChart({ series, height = 230, formatValue = fmtAxis
   const slotW = groupW / series.length
   const barW = Math.max(1, slotW > 3 ? slotW - 1 : slotW)
 
-  const at = (si, i) => series[si]?.points[i]?.value || 0
+  const at = (si, i) => series[si]?.points[i]?.value ?? null
   const totals = Array.from({ length: n }, (_, i) => series.reduce((sum, _, si) => sum + at(si, i), 0))
   const scale = niceScale(Math.max(...series.flatMap((s) => s.points.map((p) => p.value || 0))))
   const cx = (i) => padL + band * (i + 0.5)
@@ -98,7 +98,7 @@ export default function TrendChart({ series, height = 230, formatValue = fmtAxis
           <g key={i}>
             {series.map((s, si) => {
               const v = at(si, i)
-              if (!v) return null
+              if (v == null || v === 0) return null
               const y = py(v)
               return (
                 <rect
@@ -164,7 +164,7 @@ export default function TrendChart({ series, height = 230, formatValue = fmtAxis
           {series.map((s, i) => (
             <div key={s.key || i} style={{ display: 'flex', justifyContent: 'space-between', gap: 14 }}>
               <span style={{ color: 'var(--ls-ink-soft)' }}>{s.name}</span>
-              <span className="mono">{formatValue(at(i, hover))}</span>
+              <span className="mono">{at(i, hover) == null ? '—' : formatValue(at(i, hover))}</span>
             </div>
           ))}
           {series.length > 1 && (

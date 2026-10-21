@@ -283,6 +283,8 @@ export default function TraePage() {
         onSync={startSync}
         syncing={busy || running}
         syncLabel="一键接入 Trae"
+        onTest={() => app.verifyAgent('trae')}
+        verification={app.agentVerifications?.trae}
         inspection={connectedInspection}
         actions={
           <Tooltip title="删除 Trae 里全部代理模型后按配置顺序重新添加；每个模型都会重跑一次连通性测试，可能需要几分钟">

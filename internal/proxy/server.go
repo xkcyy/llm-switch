@@ -64,6 +64,17 @@ func sourceOf(r *http.Request) string {
 	}
 }
 
+// classifyFailure 把一次已到达供应商的失败归入可用性统计分类。
+func classifyFailure(status int, err error) string {
+	if status == 499 || errors.Is(err, context.Canceled) {
+		return usage.OutcomeClientCancel
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return usage.OutcomeAuthError
+	}
+	return usage.OutcomeUpstreamError
+}
+
 type Server struct {
 	store  *config.Store
 	index  *Holder
@@ -305,9 +316,37 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	rec.Model = match.Model.ID
 	rec.Session = sessionID(r, body, match.Model.ID)
 
+	// 统一记录到达供应商之后的请求结果。网络失败、超时、上游错误和成功
+	// 都必须走这里，否则失败率会被低估。
+	recorded := false
+	recordResult := func(out *protocol.Outcome, outcome string) {
+		if recorded {
+			return
+		}
+		recorded = true
+		rec.DurationMS = time.Since(start).Milliseconds()
+		ok := outcome == usage.OutcomeSuccess && rec.Status >= 200 && rec.Status < 300 && rec.Error == ""
+		entry := usage.Entry{
+			Time: rec.Time, ProviderID: match.Provider.ID, ProviderName: match.Provider.Name,
+			ModelID: match.Model.ID, ModelName: match.Model.Name, Caller: rec.Source,
+			OK: ok, Outcome: outcome, HasUsage: out != nil && out.Usage != nil,
+		}
+		if out != nil && out.Usage != nil {
+			entry.Input, entry.Output, entry.Total = out.Usage.Input, out.Usage.Output, out.Usage.Total
+			entry.Cached, entry.CacheWrite, entry.Reasoning = out.Usage.Cached, out.Usage.CacheWrite, out.Usage.Reasoning
+		}
+		if out != nil && out.Timing.Streaming && !out.Timing.FirstOutputAt.IsZero() && !out.Timing.LastOutputAt.IsZero() {
+			entry.HasTiming = true
+			entry.TTFTMS = out.Timing.FirstOutputAt.Sub(start).Milliseconds()
+			entry.DecodeMS = out.Timing.LastOutputAt.Sub(out.Timing.FirstOutputAt).Milliseconds()
+		}
+		s.usageStore.Add(entry)
+	}
+
 	// 轨迹采集：旁路复制原始入站请求体，点开即可回看完整执行链路。不改变转发行为。
+	traceID := 0
 	if idx.TraceEnabled {
-		traceID := s.traces.Add(trace.Entry{
+		traceID = s.traces.Add(trace.Entry{
 			Time: start, Source: rec.Source, Session: rec.Session, Protocol: string(entry),
 			RequestModel: head.Model, Provider: match.Provider.Name, Model: match.Model.ID,
 			Bytes: len(body), Body: append([]byte(nil), body...),
@@ -398,6 +437,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 			status, msg = http.StatusGatewayTimeout, "上游超时"
 		}
 		rec.Status, rec.Error = status, msg
+		recordResult(nil, classifyFailure(status, err))
 		s.log(rec)
 		if status != 499 {
 			protocol.WriteError(w, entry, status, msg)
@@ -407,9 +447,27 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 	defer resp.Body.Close()
 	rec.Status = resp.StatusCode
 
+	// 原始响应旁路采集：TeeReader 只观察代理实际读到的字节，不改变客户端收到的响应。
+	var responseBody io.Reader = resp.Body
+	var captured *responseCapture
+	if traceID != 0 {
+		captured = &responseCapture{limit: maxBodyBytes}
+		responseBody = io.TeeReader(resp.Body, captured)
+	}
+
 	// 响应侧转换：上游错误体、流式事件、非流式响应与直通都在转换模块里收口。
-	out, derr := relay.Deliver(resp.StatusCode, resp.Header, resp.Body, w)
+	out, derr := relay.Deliver(resp.StatusCode, resp.Header, responseBody, w)
+	if traceID != 0 && captured != nil {
+		s.traces.SetResponse(traceID, trace.Response{
+			Status: resp.StatusCode, Proto: resp.Proto, Bytes: captured.seen,
+			Truncated: captured.truncated, Headers: captureHeaders(resp.Header),
+			Body: captured.body.Bytes(),
+		})
+	}
 	rec.Warnings = append(out.Warnings, planWarnings...)
+	if out.DownstreamStatus != 0 {
+		rec.Status = out.DownstreamStatus
+	}
 	if out.UpstreamBody != nil {
 		rec.Error = fmt.Sprintf("上游 HTTP %d: %s", out.UpstreamStatus, upstreamErrorSummary(out.UpstreamBody, resp))
 	}
@@ -417,18 +475,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 		rec.Error = "流式转换中断: " + derr.Error()
 		slog.Warn("流式转换中断", "error", derr)
 	}
-	rec.DurationMS = time.Since(start).Milliseconds()
-	recUsage := usage.Entry{
-		Time: rec.Time, ProviderID: match.Provider.ID, ProviderName: match.Provider.Name,
-		ModelID: match.Model.ID, ModelName: match.Model.Name, Caller: rec.Source,
-		OK:       rec.Status >= 200 && rec.Status < 300 && rec.Error == "",
-		HasUsage: out.Usage != nil,
+	outcome := usage.OutcomeSuccess
+	if derr != nil {
+		outcome = classifyFailure(rec.Status, derr)
+	} else if out.UpstreamStatus >= 400 {
+		outcome = classifyFailure(out.UpstreamStatus, nil)
 	}
-	if out.Usage != nil {
-		recUsage.Input, recUsage.Output, recUsage.Total = out.Usage.Input, out.Usage.Output, out.Usage.Total
-		recUsage.Cached, recUsage.CacheWrite, recUsage.Reasoning = out.Usage.Cached, out.Usage.CacheWrite, out.Usage.Reasoning
-	}
-	s.usageStore.Add(recUsage)
+	recordResult(&out, outcome)
 	s.log(rec)
 }
 
@@ -583,6 +636,29 @@ func captureHeaders(h http.Header) []trace.Header {
 		}
 	}
 	return out
+}
+
+// responseCapture 旁路保存最多 limit 字节的响应体，同时统计完整字节数。
+type responseCapture struct {
+	body      bytes.Buffer
+	limit     int
+	seen      int
+	truncated bool
+}
+
+func (c *responseCapture) Write(p []byte) (int, error) {
+	c.seen += len(p)
+	if remain := c.limit - c.body.Len(); remain > 0 {
+		if len(p) > remain {
+			c.body.Write(p[:remain])
+			c.truncated = true
+		} else {
+			c.body.Write(p)
+		}
+	} else if len(p) > 0 {
+		c.truncated = true
+	}
+	return len(p), nil
 }
 
 func sensitiveHeader(name string) bool {

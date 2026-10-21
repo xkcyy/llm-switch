@@ -32,10 +32,16 @@ async function request(path, { method = 'GET', body } = {}) {
       data = { error: text }
     }
   }
+  if (res.status === 401 && !sessionStorage.getItem('llm-switch-token-retry')) {
+    sessionStorage.setItem('llm-switch-token-retry', '1')
+    window.location.reload()
+    throw new Error(data?.error || '管理令牌已更新，页面正在重新加载')
+  }
   if (!res.ok) {
     const msg = data?.error || `请求失败（HTTP ${res.status}）`
     throw new Error(msg)
   }
+  sessionStorage.removeItem('llm-switch-token-retry')
   return data
 }
 
@@ -44,6 +50,9 @@ export const Api = {
   usage: {
     summary: () => request('/api/usage'),
     report: (params = {}) => request(`/api/usage/report?${new URLSearchParams(params)}`)
+  },
+  metrics: {
+    report: (params = {}) => request(`/api/metrics/report?${new URLSearchParams(params)}`)
   },
 
   trajectory: {
@@ -114,6 +123,10 @@ export const Api = {
     setAuto: (enabled) => request('/api/workbuddy/auto', { method: 'PUT', body: { enabled } }),
     sync: (body = {}) => request('/api/workbuddy/sync', { method: 'POST', body }),
     disconnect: () => request('/api/workbuddy/disconnect', { method: 'POST' })
+  },
+
+  agents: {
+    test: (agent) => request(`/api/agents/${agent}/test`, { method: 'POST' })
   },
 
   settings: {

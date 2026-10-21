@@ -81,6 +81,54 @@ func TestQueryHourGranularity(t *testing.T) {
 	}
 }
 
+func TestQueryMinuteGranularityAndDerivedMetrics(t *testing.T) {
+	s := NewStore()
+	now := time.Now()
+	minute := now.Truncate(time.Minute)
+	s.Add(Entry{
+		Time: minute, ProviderID: "p", ProviderName: "Provider", ModelID: "m",
+		OK: true, Outcome: OutcomeSuccess, HasUsage: true, Output: 10, Total: 10,
+		HasTiming: true, TTFTMS: 200, DecodeMS: 1000,
+	})
+	s.Add(Entry{
+		Time: minute, ProviderID: "p", ProviderName: "Provider", ModelID: "m",
+		OK: false, Outcome: OutcomeAuthError,
+	})
+	s.Add(Entry{
+		Time: minute, ProviderID: "p", ProviderName: "Provider", ModelID: "m",
+		OK: false, Outcome: OutcomeClientCancel,
+	})
+
+	res := s.Query(Query{From: minute, To: minute, Granularity: GranMinute, Group: GroupProvider})
+	if res.Totals.Requests != 3 || res.Totals.OK != 1 || res.Totals.Err != 2 ||
+		res.Totals.AuthErr != 1 || res.Totals.ClientCancel != 1 {
+		t.Fatalf("分类合计错误：%+v", res.Totals)
+	}
+	metrics := res.Totals.Derive()
+	if metrics.SuccessRate == nil || *metrics.SuccessRate != 0.5 {
+		t.Fatalf("成功率应为 1/(1+1)=0.5：%+v", metrics)
+	}
+	if metrics.Excluded != 1 || metrics.Cancelled != 1 {
+		t.Fatalf("客户端取消应排除：%+v", metrics)
+	}
+	if metrics.TPS == nil || *metrics.TPS != 10 {
+		t.Fatalf("TPS 应为 10：%+v", metrics)
+	}
+	if metrics.TTFTMS == nil || *metrics.TTFTMS != 200 {
+		t.Fatalf("TTFT 应为 200ms：%+v", metrics)
+	}
+	if len(res.Groups) != 1 || res.Groups[0].LastPeriod != minute.Format(minuteLayout) {
+		t.Fatalf("最后监测时段错误：%+v", res.Groups)
+	}
+}
+
+func TestDeriveTreatsLegacyErrAsProviderFailure(t *testing.T) {
+	m := (Totals{Requests: 2, OK: 1, Err: 1}).Derive()
+	if m.Failed != 1 || m.SuccessRate == nil || *m.SuccessRate != 0.5 {
+		t.Fatalf("旧数据失败分类错误：%+v", m)
+	}
+}
+
 // TestQueryKeepsNameSnapshotPerPeriod 改名后，旧时段的历史仍显示当时的名字。
 func TestQueryKeepsNameSnapshotPerPeriod(t *testing.T) {
 	s := NewStore()

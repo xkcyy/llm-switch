@@ -67,7 +67,8 @@ type Relay struct {
 	callIDs          []string
 
 	// usage 由响应侧解析填充，经 Outcome 交回调用方。
-	usage *CallUsage
+	usage  *CallUsage
+	timing OutputTiming
 }
 
 // LookupReasoning 返回某个工具调用对应的真实思考内容：先查代理侧缓存
@@ -92,8 +93,20 @@ type Outcome struct {
 	// UpstreamBody 仅在上游返回 >= 400 时填充（已限长），供调用方记录错误摘要。
 	UpstreamStatus int
 	UpstreamBody   []byte
+	// DownstreamStatus 是实际回给客户端的错误状态码；上游异常被重新分类时与 UpstreamStatus 不同。
+	DownstreamStatus int
 	// Usage 是本次响应上报的用量；nil 表示上游没给，调用方据此记无用量，不估算。
 	Usage *CallUsage
+	// Timing 是流式响应的可观测时序；非流式响应不填充。
+	Timing OutputTiming
+}
+
+// OutputTiming 记录流式响应中第一个和最后一个有效输出事件的时间。
+// 生成耗时由 LastOutputAt - FirstOutputAt 得出；TTFT 由调用方结合请求开始时间计算。
+type OutputTiming struct {
+	Streaming     bool
+	FirstOutputAt time.Time
+	LastOutputAt  time.Time
 }
 
 // encodeContext 是编码器可用的请求侧上下文：上游身份、自定义工具名、告警出口。
@@ -159,11 +172,13 @@ func Prepare(entry, up Protocol, body []byte, id Identity) (*Relay, []byte, erro
 func (r *Relay) Deliver(status int, header http.Header, body io.Reader, w http.ResponseWriter) (Outcome, error) {
 	if status >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(body, 64<<10))
+		downstreamStatus := normalizeUpstreamErrorStatus(status, b)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		w.Write(ConvertErrorBody(r.entry, status, b))
+		w.WriteHeader(downstreamStatus)
+		w.Write(ConvertErrorBody(r.entry, downstreamStatus, b))
 		out := r.outcome()
 		out.UpstreamStatus, out.UpstreamBody = status, b
+		out.DownstreamStatus = downstreamStatus
 		return out, nil
 	}
 	streaming := r.stream && strings.Contains(header.Get("Content-Type"), "event-stream")
@@ -172,7 +187,8 @@ func (r *Relay) Deliver(status int, header http.Header, body io.Reader, w http.R
 		w.WriteHeader(status)
 		flush := flushFunc(w)
 		// 流式用量统一旁路采集：扫描器只读不写，转发的字节原样放行。
-		scan := &usageScanner{r: body}
+		r.timing.Streaming = true
+		scan := &usageScanner{r: body, onOutput: r.noteOutput}
 		var err error
 		switch {
 		case r.legacy:
@@ -237,12 +253,33 @@ func (r *Relay) Deliver(status int, header http.Header, body io.Reader, w http.R
 	return r.outcome(), nil
 }
 
+// normalizeUpstreamErrorStatus 区分上游业务 400 与 Cloudflare 边缘异常。
+// Cloudflare 的通用 HTML 400 没有业务错误信息，属于网关故障；转成 502 让
+// 客户端按可重试错误处理。带明确 JSON error 的 400 保持原样。
+func normalizeUpstreamErrorStatus(status int, body []byte) int {
+	if status != http.StatusBadRequest {
+		return status
+	}
+	lower := strings.ToLower(string(body))
+	if strings.Contains(lower, "<html") && strings.Contains(lower, "cloudflare") {
+		return http.StatusBadGateway
+	}
+	return status
+}
+
 func (r *Relay) context() *encodeContext {
 	return &encodeContext{id: r.id, customTools: r.customTools, relay: r}
 }
 
 func (r *Relay) outcome() Outcome {
-	return Outcome{Warnings: r.warnings, Usage: r.usage}
+	return Outcome{Warnings: r.warnings, Usage: r.usage, Timing: r.timing}
+}
+
+func (r *Relay) noteOutput(at time.Time) {
+	if r.timing.FirstOutputAt.IsZero() {
+		r.timing.FirstOutputAt = at
+	}
+	r.timing.LastOutputAt = at
 }
 
 // capture 包装事件回调，累积思考内容与工具调用 ID 供后续请求回填。

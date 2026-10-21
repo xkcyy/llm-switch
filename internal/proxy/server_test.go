@@ -146,6 +146,22 @@ func TestProxyRecordsTrace(t *testing.T) {
 	if !strings.Contains(string(got.Body), "hello") {
 		t.Fatalf("轨迹未保存原始请求体")
 	}
+	entry, ok := srv.Traces().Get(got.ID)
+	if !ok {
+		t.Fatal("轨迹记录未找到")
+	}
+	if entry.Response == nil {
+		t.Fatal("轨迹未保存原始响应")
+	}
+	if entry.Response.Status != http.StatusOK {
+		t.Fatalf("原始响应状态 = %d, want 200", entry.Response.Status)
+	}
+	if !strings.Contains(string(entry.Response.Body), `"content":"ok"`) {
+		t.Fatalf("原始响应体不完整: %s", entry.Response.Body)
+	}
+	if len(entry.Response.Headers) == 0 {
+		t.Fatal("轨迹未保存原始响应头")
+	}
 }
 
 // 关闭轨迹开关后不应记录入站请求。
@@ -336,7 +352,7 @@ func TestProxyResponsesToChatStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	ts := newTestProxy(t, upstream.URL)
+	ts, srv := newTestProxyServer(t, upstream.URL, nil)
 	resp, err := http.Post(ts.URL+"/v1/responses", "application/json",
 		strings.NewReader(`{"model":"DeepSeek/deepseek-chat","input":"ping","stream":true}`))
 	if err != nil {
@@ -352,6 +368,13 @@ func TestProxyResponsesToChatStream(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("流式输出缺少 %q\n%s", want, out)
 		}
+	}
+	list := srv.Traces().List()
+	if len(list) != 1 || list[0].Response == nil {
+		t.Fatal("流式请求未保存原始响应")
+	}
+	if !strings.Contains(string(list[0].Response.Body), `"content":"po"`) {
+		t.Fatalf("流式原始响应不完整: %s", list[0].Response.Body)
 	}
 }
 
@@ -380,6 +403,66 @@ func TestProxyUpstreamErrorConversion(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&out)
 	if !strings.Contains(out.Error.Message, "bad key") {
 		t.Fatalf("错误信息未透传: %+v", out)
+	}
+}
+
+// Cloudflare 的通用 HTML 400 没有业务错误信息，按网关故障转成 502，
+// 让 Codex 走已有的 5xx 重试路径。
+func TestProxyCloudflareBadRequestBecomesBadGateway(t *testing.T) {
+	const cloudflareHTML = `<html>
+<head><title>400 Bad Request</title></head>
+<body>
+<center><h1>400 Bad Request</h1></center>
+<hr><center>cloudflare</center>
+</body>
+</html>`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(cloudflareHTML))
+	}))
+	defer upstream.Close()
+
+	ts, srv := newTestProxyServer(t, upstream.URL, nil)
+	resp, err := http.Post(ts.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"deepseek/deepseek-chat","input":"ping"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	var out struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Error.Type != "api_error" || !strings.Contains(strings.ToLower(out.Error.Message), "cloudflare") {
+		t.Fatalf("错误体不符合 5xx 语义: %+v", out)
+	}
+
+	rec := lastRecord(t, srv)
+	if rec.Status != http.StatusBadGateway {
+		t.Fatalf("记录状态 = %d, want %d", rec.Status, http.StatusBadGateway)
+	}
+	if !strings.Contains(rec.Error, "上游 HTTP 400") {
+		t.Fatalf("记录应保留原始上游状态: %q", rec.Error)
+	}
+	traces := srv.Traces().List()
+	if len(traces) != 1 || traces[0].Response == nil {
+		t.Fatal("上游错误响应未保存")
+	}
+	if traces[0].Response.Status != http.StatusBadRequest {
+		t.Fatalf("原始响应状态 = %d, want 400", traces[0].Response.Status)
+	}
+	if !strings.Contains(string(traces[0].Response.Body), "cloudflare") {
+		t.Fatalf("上游错误响应体不完整: %s", traces[0].Response.Body)
 	}
 }
 
@@ -639,7 +722,10 @@ func TestProxyLogsUpstreamErrorDetail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("普通 JSON 400 不应改写，status = %d", resp.StatusCode)
+	}
 
 	rec := lastRecord(t, srv)
 	if !strings.Contains(rec.Error, "reasoning_content") || !strings.Contains(rec.Error, "req-123") {

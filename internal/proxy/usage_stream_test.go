@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"llm-switch/internal/config"
 )
@@ -75,6 +76,9 @@ func TestUsageStreamingCollected(t *testing.T) {
 			if tot.Cached != 3 || tot.Reasoning != 2 {
 				t.Fatalf("cached/reasoning = %d/%d", tot.Cached, tot.Reasoning)
 			}
+			if tot.TTFTSamples != 1 {
+				t.Fatalf("流式请求应记录 TTFT 样本，实际 %d", tot.TTFTSamples)
+			}
 			if tot.MissingUsage != 0 {
 				t.Fatalf("missing_usage = %d", tot.MissingUsage)
 			}
@@ -111,5 +115,52 @@ func TestUsageStreamingMissingCounted(t *testing.T) {
 	}
 	if tot.Total != 0 {
 		t.Fatalf("缺用量时 token 应为 0，实际 %d", tot.Total)
+	}
+}
+
+// 流式请求至少要有一个可测量的生成区间，才能形成 TPS 样本。
+func TestUsageStreamingTimingAndSpeed(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		chunks := []string{
+			`data: {"id":"c1","choices":[{"delta":{"content":"he"}}]}` + "\n\n",
+			`data: {"id":"c1","choices":[{"delta":{"content":"llo"}}]}` + "\n\n",
+			`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}` + "\n\n",
+			"data: [DONE]\n\n",
+		}
+		for i, chunk := range chunks {
+			io.WriteString(w, chunk)
+			if fl != nil {
+				fl.Flush()
+			}
+			if i == 0 {
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	ts, srv := newTestProxyServer(t, upstream.URL, func(c *config.Config) {
+		c.Providers[0].Protocols = []string{"chat"}
+		c.Providers[0].Protocol = "chat"
+	})
+	postEntry(t, ts, "/v1/chat/completions", chatStreamEntryBody)
+
+	now := time.Now()
+	tot := srv.Usage().MinuteTotals(now.Add(-time.Hour), now.Add(time.Hour))
+	if tot.Requests != 1 || tot.OK != 1 || tot.SpeedSamples != 1 || tot.TTFTSamples != 1 {
+		t.Fatalf("timing totals = %+v", tot)
+	}
+	if tot.DecodeMS < 10 {
+		t.Fatalf("生成时长过短，无法验证 TPS 样本: %dms", tot.DecodeMS)
+	}
+	metrics := tot.Derive()
+	if metrics.TPS == nil || *metrics.TPS <= 0 {
+		t.Fatalf("TPS 未生成: %+v", metrics)
+	}
+	if metrics.TTFTMS == nil || *metrics.TTFTMS < 0 {
+		t.Fatalf("TTFT 未生成: %+v", metrics)
 	}
 }

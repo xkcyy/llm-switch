@@ -1,4 +1,4 @@
-// Package trace 保存最近若干条入站推理请求的原始请求体与元数据，
+// Package trace 保存最近若干条入站推理请求的原始请求/响应体与元数据，
 // 供管理界面按单条请求查看轨迹。不按会话合并，不落盘，重启即丢。
 package trace
 
@@ -32,12 +32,25 @@ type Entry struct {
 	// Body 与 Headers 只在 Get/Raw 时返回，不进列表接口。
 	Body    []byte   `json:"-"`
 	Headers []Header `json:"-"`
+
+	// Response 是上游返回的原始响应；请求未能到达上游时为空。
+	Response *Response `json:"response,omitempty"`
 }
 
 // Header 是一条原始请求头；值已脱敏。
 type Header struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+}
+
+// Response 是一条原始上游响应。Headers 与 Body 只在原始报文接口返回。
+type Response struct {
+	Status    int      `json:"status"`
+	Proto     string   `json:"proto,omitempty"`
+	Bytes     int      `json:"bytes"`
+	Truncated bool     `json:"truncated,omitempty"`
+	Headers   []Header `json:"-"`
+	Body      []byte   `json:"-"`
 }
 
 // Store 是固定容量的环形记录：读多写少，单锁足够。
@@ -71,6 +84,21 @@ func (s *Store) Complete(id int, status int, durationMS int64) {
 		if e.ID == id {
 			e.Status = status
 			e.DurationMS = durationMS
+			return
+		}
+	}
+}
+
+// SetResponse 回填上游返回的原始响应。
+func (s *Store) SetResponse(id int, resp Response) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.entries {
+		if e.ID == id {
+			cp := resp
+			cp.Headers = append([]Header(nil), resp.Headers...)
+			cp.Body = append([]byte(nil), resp.Body...)
+			e.Response = &cp
 			return
 		}
 	}

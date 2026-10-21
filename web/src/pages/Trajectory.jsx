@@ -173,6 +173,7 @@ export default function Trajectory() {
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(null)
   const [rawOpen, setRawOpen] = useState(false)
+  const [rawTab, setRawTab] = useState('request')
   const [rawData, setRawData] = useState(null)
   const loadingRef = useRef(false)
 
@@ -221,10 +222,16 @@ export default function Trajectory() {
       .finally(() => setDetailLoading(false))
   }
 
-  const openRaw = async () => {
+  const openRaw = async (tab = 'request') => {
     try {
       const res = await Api.trajectory.raw(selected.id)
-      setRawData({ entry: res.entry || selected, headers: res.headers || [], body: res.body || '' })
+      setRawData({
+        entry: res.entry || selected,
+        headers: res.headers || [],
+        body: res.body || '',
+        response: res.response || null
+      })
+      setRawTab(tab)
       setRawOpen(true)
     } catch (e) {
       message.error(e.message)
@@ -370,7 +377,7 @@ export default function Trajectory() {
     <div className="stack">
       <PageHeader
         title="请求轨迹"
-        description="回看最近入站请求的系统提示词、工具与执行链路；仅存内存，不落盘。"
+        description="回看最近入站请求的系统提示词、工具、执行链路与上游原始响应；仅存内存，不落盘。"
       />
       <Panel
         title="入站请求"
@@ -379,9 +386,9 @@ export default function Trajectory() {
           <Space>
             <Space size={6}>
               <Text type="secondary">自动刷新（5 秒）</Text>
-              <Switch size="small" checked={autoRefresh} onChange={setAutoRefresh} />
+              <Switch checked={autoRefresh} onChange={setAutoRefresh} />
             </Space>
-            <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => load()}>
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => load()}>
               刷新
             </Button>
           </Space>
@@ -414,9 +421,14 @@ export default function Trajectory() {
         onClose={() => setSelected(null)}
         title={selected ? `#${selected.id} · ${selected.request_model}` : ''}
         extra={
-          <Button size="small" onClick={openRaw} disabled={!selected}>
-            原始请求
-          </Button>
+          <Space>
+            <Button size="small" onClick={() => openRaw('request')} disabled={!selected}>
+              原始请求
+            </Button>
+            <Button size="small" onClick={() => openRaw('response')} disabled={!selected}>
+              原始响应
+            </Button>
+          </Space>
         }
       >
         {selected && (
@@ -452,37 +464,94 @@ export default function Trajectory() {
         onCancel={() => setRawOpen(false)}
         footer={null}
         width={960}
-        title={selected ? `#${selected.id} 原始请求` : '原始请求'}
+        title={selected ? `#${selected.id} 原始报文` : '原始报文'}
       >
-        <div className="trace-raw">
-          {rawData?.entry && (
-            <>
-              <div className="trace-raw-line">
-                <Tag color="blue" bordered={false}>
-                  {rawData.entry.method}
-                </Tag>
-                <span className="mono trace-raw-url">{rawData.entry.url}</span>
-                <Text type="secondary" className="text-xs">
-                  {rawData.entry.proto}
-                </Text>
-              </div>
-              <div className="trace-raw-headers">
-                {rawData.headers.length === 0 ? (
-                  <Text type="secondary" className="text-xs">
-                    没有记录到请求头
-                  </Text>
-                ) : (
-                  rawData.headers.map((h, i) => (
-                    <div key={`${h.name}-${i}`} className="mono">
-                      <span className="trace-raw-hname">{h.name}</span>: {h.value}
-                    </div>
-                  ))
-                )}
-              </div>
-            </>
-          )}
-          <pre className="trace-pre">{rawData?.body}</pre>
-        </div>
+        <Tabs
+          activeKey={rawTab}
+          onChange={setRawTab}
+          items={[
+            {
+              key: 'request',
+              label: '原始请求',
+              children: (
+                <div className="trace-raw">
+                  {rawData?.entry && (
+                    <>
+                      <div className="trace-raw-line">
+                        <Tag color="blue" bordered={false}>
+                          {rawData.entry.method}
+                        </Tag>
+                        <span className="mono trace-raw-url">{rawData.entry.url}</span>
+                        <Text type="secondary" className="text-xs">
+                          {rawData.entry.proto}
+                        </Text>
+                      </div>
+                      <div className="trace-raw-headers">
+                        {rawData.headers.length === 0 ? (
+                          <Text type="secondary" className="text-xs">
+                            没有记录到请求头
+                          </Text>
+                        ) : (
+                          rawData.headers.map((h, i) => (
+                            <div key={`${h.name}-${i}`} className="mono">
+                              <span className="trace-raw-hname">{h.name}</span>: {h.value}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </>
+                  )}
+                  <pre className="trace-pre">{rawData?.body}</pre>
+                </div>
+              )
+            },
+            {
+              key: 'response',
+              label: '原始响应',
+              children: rawData?.response ? (
+                <div className="trace-raw">
+                  <div className="trace-raw-line">
+                    <Tag
+                      color={
+                        rawData.response.status >= 200 && rawData.response.status < 300 ? 'success' : 'error'
+                      }
+                      bordered={false}
+                    >
+                      {rawData.response.status}
+                    </Tag>
+                    <Text type="secondary" className="text-xs">
+                      {rawData.response.proto}
+                    </Text>
+                    <Text type="secondary" className="text-xs">
+                      {fmtBytes(rawData.response.bytes)}
+                    </Text>
+                    {rawData.response.truncated && (
+                      <Tag color="warning" bordered={false}>
+                        响应过大，仅保留前 32 MB
+                      </Tag>
+                    )}
+                  </div>
+                  <div className="trace-raw-headers">
+                    {rawData.response.headers?.length ? (
+                      rawData.response.headers.map((h, i) => (
+                        <div key={`${h.name}-${i}`} className="mono">
+                          <span className="trace-raw-hname">{h.name}</span>: {h.value}
+                        </div>
+                      ))
+                    ) : (
+                      <Text type="secondary" className="text-xs">
+                        没有记录到响应头
+                      </Text>
+                    )}
+                  </div>
+                  <pre className="trace-pre">{rawData.response.body}</pre>
+                </div>
+              ) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请求未到达上游或响应尚未记录" />
+              )
+            }
+          ]}
+        />
       </Modal>
     </div>
   )

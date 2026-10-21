@@ -164,12 +164,7 @@ export default function CodexPage() {
   }
 
   const test = () => {
-    const target = app.models.find((model) => model.slug === app.defaultModel) || app.enabledModels[0]
-    if (!target) {
-      message.warning('还没有可用模型')
-      return
-    }
-    app.testModel(target.id)
+    return app.verifyAgent('codex')
   }
 
   const generated = app.codex.generated || {}
@@ -265,6 +260,7 @@ export default function CodexPage() {
         onSync={sync}
         syncing={syncing}
         onTest={test}
+        verification={app.agentVerifications?.codex}
         onDisconnect={app.disconnectCodex}
         disconnectTitle="断开 Codex 接入？"
         disconnectDescription="只移除 LLM Switch 写入的配置，不影响你其他的 Codex 设置。"

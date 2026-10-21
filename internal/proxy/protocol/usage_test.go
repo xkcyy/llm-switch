@@ -38,3 +38,29 @@ func TestParseUsageFieldNames(t *testing.T) {
 		})
 	}
 }
+
+func TestIsOutputPayload(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"chat content", `{"choices":[{"delta":{"content":"hi"}}]}`, true},
+		{"chat role only", `{"choices":[{"delta":{"role":"assistant"}}]}`, false},
+		{"chat empty finish", `{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`, false},
+		{"chat tool args", `{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"x\":"}}]}}]}`, true},
+		{"responses text delta", `{"type":"response.output_text.delta","delta":"hi"}`, true},
+		{"responses created", `{"type":"response.created","response":{"id":"r1"}}`, false},
+		{"responses completed", `{"type":"response.completed","response":{"usage":{"output_tokens":5}}}`, false},
+		{"messages text delta", `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`, true},
+		{"messages start", `{"type":"message_start","message":{"usage":{"input_tokens":1}}}`, false},
+		{"non json", `data: [DONE]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isOutputPayload([]byte(tc.body)); got != tc.want {
+				t.Fatalf("isOutputPayload = %v，期望 %v", got, tc.want)
+			}
+		})
+	}
+}

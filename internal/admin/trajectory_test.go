@@ -49,6 +49,11 @@ func TestTrajectoryListDetailRaw(t *testing.T) {
 		Method: "POST", URL: "http://127.0.0.1:8317/v1/responses", Proto: "HTTP/1.1",
 		Headers: []trace.Header{{Name: "Authorization", Value: "***"}},
 	})
+	traces.SetResponse(id, trace.Response{
+		Status: 200, Proto: "HTTP/1.1", Bytes: 7,
+		Headers: []trace.Header{{Name: "Content-Type", Value: "application/json"}},
+		Body:    []byte(`{"ok":1}`),
+	})
 	traces.Complete(id, 200, 12)
 
 	code, raw := do(t, mux, http.MethodGet, "/api/trajectory", "")
@@ -86,9 +91,16 @@ func TestTrajectoryListDetailRaw(t *testing.T) {
 		t.Fatalf("原始请求失败: %d %s", code, raw)
 	}
 	rawResp := decodeInto[struct {
-		Entry   trace.Entry    `json:"entry"`
-		Headers []trace.Header `json:"headers"`
-		Body    string         `json:"body"`
+		Entry    trace.Entry    `json:"entry"`
+		Headers  []trace.Header `json:"headers"`
+		Body     string         `json:"body"`
+		Response *struct {
+			Status  int            `json:"status"`
+			Proto   string         `json:"proto"`
+			Headers []trace.Header `json:"headers"`
+			Body    string         `json:"body"`
+			Bytes   int            `json:"bytes"`
+		} `json:"response"`
 	}](t, raw)
 	if rawResp.Body != string(body) {
 		t.Fatalf("原始请求体不一致: %q", rawResp.Body)
@@ -98,6 +110,15 @@ func TestTrajectoryListDetailRaw(t *testing.T) {
 	}
 	if len(rawResp.Headers) != 1 || rawResp.Headers[0].Name != "Authorization" {
 		t.Fatalf("原始请求缺少请求头: %+v", rawResp.Headers)
+	}
+	if rawResp.Response == nil {
+		t.Fatal("原始响应缺失")
+	}
+	if rawResp.Response.Status != 200 || rawResp.Response.Proto != "HTTP/1.1" || rawResp.Response.Body != `{"ok":1}` {
+		t.Fatalf("原始响应内容不对: %+v", rawResp.Response)
+	}
+	if len(rawResp.Response.Headers) != 1 || rawResp.Response.Headers[0].Name != "Content-Type" {
+		t.Fatalf("原始响应缺少响应头: %+v", rawResp.Response.Headers)
 	}
 
 	if code, _ := do(t, mux, http.MethodGet, "/api/trajectory/999", ""); code != http.StatusNotFound {

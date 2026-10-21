@@ -50,12 +50,7 @@ export default function WorkBuddyPage() {
   }
 
   const test = () => {
-    const target = app.models.find((model) => model.slug === app.defaultModel) || app.enabledModels[0]
-    if (!target) {
-      message.warning('还没有可用模型')
-      return
-    }
-    app.testModel(target.id)
+    return app.verifyAgent('workbuddy')
   }
 
   const disconnectedInspection = [
@@ -137,6 +132,7 @@ export default function WorkBuddyPage() {
         onSync={sync}
         syncing={syncing}
         onTest={test}
+        verification={app.agentVerifications?.workbuddy}
         onDisconnect={app.disconnectWorkBuddy}
         disconnectTitle="断开 WorkBuddy 接入？"
         disconnectDescription="只移除 LLM Switch 写入的自定义模型，不影响你其它的 WorkBuddy 设置。"

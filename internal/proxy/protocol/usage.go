@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"time"
 )
 
 // CallUsage 是一次调用里上游上报的用量。字段已归一化，找不到的记 0。
@@ -63,10 +64,11 @@ func ParseUsage(body []byte) (CallUsage, bool) {
 // usageScanner 旁路解析 SSE 流里的 usage，读到的字节原样返回（不改写转发内容）。
 // 与转发在同一个 goroutine 上顺序执行，无需加锁。
 type usageScanner struct {
-	r     io.Reader
-	buf   []byte
-	usage CallUsage
-	found bool
+	r        io.Reader
+	buf      []byte
+	usage    CallUsage
+	found    bool
+	onOutput func(time.Time)
 }
 
 func (s *usageScanner) Read(p []byte) (int, error) {
@@ -102,10 +104,64 @@ func (s *usageScanner) handleLine(line []byte) {
 	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 		return
 	}
+	if isOutputPayload(payload) && s.onOutput != nil {
+		s.onOutput(time.Now())
+	}
 	if u, ok := ParseUsage(payload); ok {
 		mergeUsage(&s.usage, u)
 		s.found = true
 	}
+}
+
+// isOutputPayload 判断一条 SSE data 是否携带新的模型输出增量。
+// 只关心正文、推理和工具参数的增量；role、usage、created 等事件不算 token 输出。
+func isOutputPayload(payload []byte) bool {
+	var root map[string]any
+	if json.Unmarshal(payload, &root) != nil {
+		return false
+	}
+	if typ, _ := root["type"].(string); typ != "" {
+		switch typ {
+		case "response.output_text.delta", "response.reasoning_text.delta",
+			"response.reasoning_summary_text.delta", "response.function_call_arguments.delta",
+			"response.custom_tool_call_input.delta":
+			return textValue(root["delta"]) || textValue(root["text"]) ||
+				textValue(root["arguments"]) || textValue(root["partial_json"])
+		case "content_block_delta":
+			delta := asMap(root["delta"])
+			return textValue(delta["text"]) || textValue(delta["partial_json"])
+		case "content_block_start":
+			block := asMap(root["content_block"])
+			return textValue(block["text"])
+		}
+	}
+
+	choices, _ := root["choices"].([]any)
+	if len(choices) == 0 {
+		return false
+	}
+	delta := asMap(asMap(choices[0])["delta"])
+	if delta == nil {
+		return false
+	}
+	for _, key := range []string{"content", "reasoning_content", "reasoning"} {
+		if textValue(delta[key]) {
+			return true
+		}
+	}
+	toolCalls, _ := delta["tool_calls"].([]any)
+	for _, item := range toolCalls {
+		fn := asMap(asMap(item)["function"])
+		if textValue(fn["arguments"]) || textValue(fn["name"]) {
+			return true
+		}
+	}
+	return false
+}
+
+func textValue(v any) bool {
+	s, ok := v.(string)
+	return ok && s != ""
 }
 
 // mergeUsage 合并同一流里多个事件的用量，各字段取较大值：

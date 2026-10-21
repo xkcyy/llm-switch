@@ -130,12 +130,7 @@ export default function OpenCodePage() {
   }
 
   const test = () => {
-    const target = app.models.find((model) => model.slug === app.defaultModel) || app.enabledModels[0]
-    if (!target) {
-      message.warning('还没有可用模型')
-      return
-    }
-    app.testModel(target.id)
+    return app.verifyAgent('opencode')
   }
 
   const disconnectedInspection = [
@@ -255,6 +250,7 @@ export default function OpenCodePage() {
         onSync={sync}
         syncing={syncing}
         onTest={test}
+        verification={app.agentVerifications?.opencode}
         onDisconnect={app.disconnectOpenCode}
         disconnectTitle="断开 OpenCode 接入？"
         disconnectDescription="只移除 LLM Switch 写入的 provider.llm-switch 段，不影响你其他的 OpenCode 设置。"

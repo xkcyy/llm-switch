@@ -173,3 +173,71 @@ func TestUsageSummaryEndpoint(t *testing.T) {
 		t.Fatalf("概览用量错误：%+v / %+v", out.Total, out.Today)
 	}
 }
+
+func TestMetricsReportProviderSummary(t *testing.T) {
+	mux, st := newUsageServer(t)
+	now := time.Now()
+	st.Add(usage.Entry{
+		Time: now, ProviderID: "p1", ProviderName: "Provider 1", ModelID: "m1", ModelName: "Model 1",
+		OK: true, Outcome: usage.OutcomeSuccess, HasUsage: true, Output: 10, Total: 10,
+		HasTiming: true, TTFTMS: 200, DecodeMS: 1000,
+	})
+	st.Add(usage.Entry{
+		Time: now, ProviderID: "p1", ProviderName: "Provider 1", ModelID: "m1", ModelName: "Model 1",
+		OK: false, Outcome: usage.OutcomeAuthError,
+	})
+	st.Add(usage.Entry{
+		Time: now, ProviderID: "p2", ProviderName: "Provider 2", ModelID: "m2", ModelName: "Model 2",
+		OK: true, Outcome: usage.OutcomeSuccess, HasUsage: true, Output: 5, Total: 5,
+		HasTiming: true, TTFTMS: 100, DecodeMS: 500,
+	})
+	st.Add(usage.Entry{
+		Time: now, ProviderID: "p2", ProviderName: "Provider 2", ModelID: "m2", ModelName: "Model 2",
+		OK: false, Outcome: usage.OutcomeClientCancel,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/metrics/report?range=90m&group=provider", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d：%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Granularity string        `json:"granularity"`
+		Group       string        `json:"group"`
+		Summary     usage.Metrics `json:"summary"`
+		Series      []struct {
+			Period  string        `json:"period"`
+			Group   string        `json:"group"`
+			Metrics usage.Metrics `json:"metrics"`
+		} `json:"series"`
+		Groups []struct {
+			usage.GroupRow
+			Metrics usage.Metrics `json:"metrics"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Granularity != usage.GranMinute || out.Group != usage.GroupProvider {
+		t.Fatalf("报表范围错误：%+v", out)
+	}
+	if out.Summary.Requests != 4 || out.Summary.OK != 2 || out.Summary.Failed != 1 || out.Summary.Excluded != 1 {
+		t.Fatalf("汇总分类错误：%+v", out.Summary)
+	}
+	if out.Summary.SuccessRate == nil || *out.Summary.SuccessRate != 2.0/3.0 {
+		t.Fatalf("成功率应为 2/3：%+v", out.Summary)
+	}
+	if out.Summary.TPS == nil || *out.Summary.TPS != 10 {
+		t.Fatalf("加权 TPS 应为 10：%+v", out.Summary)
+	}
+	if out.Summary.TTFTMS == nil || *out.Summary.TTFTMS != 150 {
+		t.Fatalf("平均 TTFT 应为 150ms：%+v", out.Summary)
+	}
+	if len(out.Groups) != 2 || len(out.Series) != 180 {
+		t.Fatalf("供应商×90 分钟序列数量错误：groups=%d series=%d", len(out.Groups), len(out.Series))
+	}
+	if out.Groups[0].LastPeriod == "" {
+		t.Fatalf("缺少最后监测时段：%+v", out.Groups[0])
+	}
+}

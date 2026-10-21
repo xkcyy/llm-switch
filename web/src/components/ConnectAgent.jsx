@@ -1,6 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Alert, Button, Divider, Drawer, Popconfirm, Switch, Typography } from 'antd'
-import { CheckCircleFilled, DisconnectOutlined, RocketOutlined, SyncOutlined, ThunderboltOutlined } from '@ant-design/icons'
+import {
+  CheckCircleFilled,
+  DisconnectOutlined,
+  RocketOutlined,
+  SyncOutlined,
+  ThunderboltOutlined
+} from '@ant-design/icons'
 import Panel from './Panel'
 
 const { Text } = Typography
@@ -36,6 +42,42 @@ function Inspection({ items }) {
   )
 }
 
+const ENTRY_LABEL = { chat: 'Chat', responses: 'Responses', messages: 'Messages' }
+
+function VerificationResult({ result }) {
+  if (!result) return null
+  const checkedAt = result.checked_at
+    ? new Date(result.checked_at).toLocaleString('zh-CN', { hour12: false })
+    : ''
+  return (
+    <Alert
+      type={result.ok ? 'success' : 'error'}
+      showIcon
+      message={result.ok ? '调用链路验证通过' : '调用链路验证失败'}
+      description={
+        <div className="verification-result">
+          <div>{result.message}</div>
+          <div className="verification-meta">
+            {typeof result.configured === 'boolean'
+              ? result.configured
+                ? '配置已就绪 · '
+                : '配置未检测到 · '
+              : null}
+            {result.entry ? `入口 ${ENTRY_LABEL[result.entry] || result.entry}` : null}
+            {result.model ? ` · 模型 ${result.model}` : null}
+            {result.status ? ` · HTTP ${result.status}` : null}
+            {result.latency_ms ? ` · ${result.latency_ms}ms` : null}
+            {checkedAt ? ` · ${checkedAt}` : null}
+          </div>
+          {!result.ok && result.message?.includes('代理') ? (
+            <div className="verification-hint">先确认顶部代理状态，再检查默认模型和供应商配置。</div>
+          ) : null}
+        </div>
+      }
+    />
+  )
+}
+
 export default function ConnectAgent({
   connected = false,
   warnings = [],
@@ -66,12 +108,34 @@ export default function ConnectAgent({
   syncing = false,
   syncLabel = '重新同步',
   onTest,
+  verification,
   onDisconnect,
   disconnectTitle = '断开接入？',
   disconnectDescription = '只移除 LLM Switch 写入的配置，不影响 Agent 的其他设置。'
 }) {
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [testState, setTestState] = useState(null)
+  const [testing, setTesting] = useState(false)
   const hasPreview = Boolean(previewContent || previewPlaceholder)
+  const currentVerification = testState || verification
+
+  useEffect(() => {
+    setTestState(null)
+  }, [verification])
+
+  const runTest = async () => {
+    if (!onTest || testing) return
+    setTesting(true)
+    setTestState(null)
+    try {
+      const result = await onTest()
+      if (result) setTestState(result)
+    } catch (error) {
+      setTestState({ ok: false, message: error.message || '验证失败' })
+    } finally {
+      setTesting(false)
+    }
+  }
 
   if (!connected) {
     return (
@@ -147,14 +211,24 @@ export default function ConnectAgent({
         </div>
         <div className="connect-actions">
           {actions}
-          {onSync ? (
-            <Button type="primary" icon={<SyncOutlined spin={syncing} />} loading={syncing} onClick={onSync}>
-              {syncLabel}
+          {onTest ? (
+            <Button
+              type={currentVerification?.ok ? 'default' : 'primary'}
+              icon={<ThunderboltOutlined />}
+              loading={testing}
+              onClick={runTest}
+            >
+              {currentVerification?.ok ? '重新验证' : '验证调用链路'}
             </Button>
           ) : null}
-          {onTest ? (
-            <Button icon={<ThunderboltOutlined />} onClick={onTest}>
-              测试一次调用
+          {onSync ? (
+            <Button
+              type={currentVerification?.ok ? 'primary' : 'default'}
+              icon={<SyncOutlined spin={syncing} />}
+              loading={syncing}
+              onClick={onSync}
+            >
+              {syncLabel}
             </Button>
           ) : null}
           {onDisconnect ? (
@@ -173,6 +247,8 @@ export default function ConnectAgent({
           ) : null}
         </div>
       </Panel>
+
+      <VerificationResult result={currentVerification} />
 
       <Panel title="当前配置" subtitle="只维护本工具写入的片段，其他内容保持不变。">
         <Inspection items={inspection} />

@@ -7,9 +7,10 @@ import (
 
 // 时间粒度。
 const (
-	GranHour  = "hour"
-	GranDay   = "day"
-	GranMonth = "month"
+	GranMinute = "minute"
+	GranHour   = "hour"
+	GranDay    = "day"
+	GranMonth  = "month"
 )
 
 // 分组维度。
@@ -39,12 +40,15 @@ type SeriesPoint struct {
 
 // GroupRow 是一个分组的合计。名称字段是该组最新时段写入时的快照。
 type GroupRow struct {
-	Key          string `json:"key"`
-	ProviderID   string `json:"provider_id,omitempty"`
-	ProviderName string `json:"provider_name,omitempty"`
-	ModelID      string `json:"model_id,omitempty"`
-	ModelName    string `json:"model_name,omitempty"`
-	Caller       string `json:"caller,omitempty"`
+	Key           string `json:"key"`
+	ProviderID    string `json:"provider_id,omitempty"`
+	ProviderName  string `json:"provider_name,omitempty"`
+	ModelID       string `json:"model_id,omitempty"`
+	ModelName     string `json:"model_name,omitempty"`
+	Caller        string `json:"caller,omitempty"`
+	LastPeriod    string `json:"last_period,omitempty"`
+	LastOKPeriod  string `json:"last_ok_period,omitempty"`
+	LastErrPeriod string `json:"last_err_period,omitempty"`
 	Totals
 
 	// namePeriod 记住名称快照来自哪个时段，用于取最新的一份（不参与序列化）。
@@ -58,14 +62,31 @@ type Result struct {
 	Groups []GroupRow    `json:"groups"`
 }
 
-// Query 汇总指定区间与维度的用量。月粒度由日桶合并而来，小时粒度读小时桶。
+// EarliestDay 返回日桶中最早的一天，供“全部”范围查询使用。
+func (s *Store) EarliestDay() (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	earliest := ""
+	for k := range s.days {
+		if earliest == "" || k.Period < earliest {
+			earliest = k.Period
+		}
+	}
+	return earliest, earliest != ""
+}
+
+// Query 汇总指定区间与维度的用量。月粒度由日桶合并而来，小时/分钟粒度读对应桶。
 func (s *Store) Query(q Query) Result {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	source := s.days
 	from, to := q.From.Format(dayLayout), q.To.Format(dayLayout)
-	if q.Granularity == GranHour {
+	switch q.Granularity {
+	case GranMinute:
+		source = s.minutes
+		from, to = q.From.Format(minuteLayout), q.To.Format(minuteLayout)
+	case GranHour:
 		source = s.hours
 		from, to = q.From.Format(hourLayout), q.To.Format(hourLayout)
 	}
@@ -100,6 +121,15 @@ func (s *Store) Query(q Query) Result {
 		point.add(&b.Totals)
 		tot.add(&b.Totals)
 		row.add(&b.Totals)
+		if k.Period > row.LastPeriod {
+			row.LastPeriod = k.Period
+		}
+		if b.OK > 0 && k.Period > row.LastOKPeriod {
+			row.LastOKPeriod = k.Period
+		}
+		if b.Err > 0 && k.Period > row.LastErrPeriod {
+			row.LastErrPeriod = k.Period
+		}
 		if k.Period >= row.namePeriod {
 			row.namePeriod = k.Period
 			if b.ProviderName != "" {

@@ -133,7 +133,39 @@ func TestUsageUpstreamErrorCountsErr(t *testing.T) {
 	if tot.Requests != 1 || tot.Err != 1 || tot.OK != 0 {
 		t.Fatalf("requests/ok/err = %d/%d/%d", tot.Requests, tot.OK, tot.Err)
 	}
+	if tot.UpstreamErr != 1 {
+		t.Fatalf("上游 500 应计入 upstream_err，实际 %+v", tot)
+	}
 	if tot.MissingUsage != 0 {
 		t.Fatalf("失败调用不应计入 missing_usage，实际 %d", tot.MissingUsage)
+	}
+}
+
+// 认证失败单独计数，避免与网络/限流/5xx 混在一起。
+func TestUsageAuthErrorClassified(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":{"message":"bad key"}}`))
+	}))
+	defer upstream.Close()
+	ts, srv := newTestProxyServer(t, upstream.URL, nil)
+	postEntry(t, ts, "/v1/chat/completions", chatEntryBody)
+
+	from, to := usageRange()
+	tot := srv.Usage().Totals(from, to)
+	if tot.Requests != 1 || tot.OK != 0 || tot.Err != 1 || tot.AuthErr != 1 {
+		t.Fatalf("requests/ok/err/auth = %d/%d/%d/%d", tot.Requests, tot.OK, tot.Err, tot.AuthErr)
+	}
+}
+
+// 连接失败也必须进入可用性统计，不能只统计已经拿到 HTTP 响应的请求。
+func TestUsageNetworkFailureClassified(t *testing.T) {
+	ts, srv := newTestProxyServer(t, "http://127.0.0.1:1", nil)
+	postEntry(t, ts, "/v1/chat/completions", chatEntryBody)
+
+	from, to := usageRange()
+	tot := srv.Usage().Totals(from, to)
+	if tot.Requests != 1 || tot.OK != 0 || tot.Err != 1 || tot.UpstreamErr != 1 {
+		t.Fatalf("requests/ok/err/upstream = %d/%d/%d/%d", tot.Requests, tot.OK, tot.Err, tot.UpstreamErr)
 	}
 }

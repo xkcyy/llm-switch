@@ -1,5 +1,3 @@
-import { Badge } from 'antd'
-
 export default function SignalNode({ title, meta, icon, active = false, muted = false, status }) {
   return (
     <div className={`signal-node${active ? ' is-active' : ''}${muted ? ' is-muted' : ''}`}>
@@ -8,7 +6,7 @@ export default function SignalNode({ title, meta, icon, active = false, muted = 
         <div className="signal-node-title">{title}</div>
         {meta ? <div className="signal-node-meta">{meta}</div> : null}
       </div>
-      {status ? <Badge status={status} /> : null}
+      {status ? <span className={`signal-status is-${status}`} /> : null}
     </div>
   )
 }

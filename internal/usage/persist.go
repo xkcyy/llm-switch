@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	fileVersion    = 1
-	retentionDays  = 7
-	flushDelay     = 3 * time.Second
-	usageFilePerms = 0o600
+	fileVersion     = 2
+	minuteRetention = 48 * time.Hour
+	hourRetention   = 7 * 24 * time.Hour
+	flushDelay      = 3 * time.Second
+	usageFilePerms  = 0o600
 )
 
 type bucketRecord struct {
@@ -28,8 +29,9 @@ type bucketRecord struct {
 
 type fileFormat struct {
 	Version int            `json:"version"`
-	Days    []bucketRecord `json:"days"`
+	Minutes []bucketRecord `json:"minutes,omitempty"`
 	Hours   []bucketRecord `json:"hours"`
+	Days    []bucketRecord `json:"days"`
 }
 
 // Open 打开（或创建）落盘文件并载入历史用量；文件不存在视为全新开始。
@@ -81,6 +83,9 @@ func (s *Store) flushLater() {
 func (s *Store) flushLocked() error {
 	s.pruneLocked(time.Now())
 	f := fileFormat{Version: fileVersion}
+	for k, b := range s.minutes {
+		f.Minutes = append(f.Minutes, recordOf(k, b))
+	}
 	for k, b := range s.days {
 		f.Days = append(f.Days, recordOf(k, b))
 	}
@@ -124,6 +129,9 @@ func (s *Store) load() error {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return fmt.Errorf("解析用量文件失败: %w", err)
 	}
+	for _, r := range f.Minutes {
+		s.minutes[r.key()] = r.bucket()
+	}
 	for _, r := range f.Days {
 		s.days[r.key()] = r.bucket()
 	}
@@ -142,7 +150,7 @@ func (r bucketRecord) bucket() *bucketData {
 	return &bucketData{Totals: t, ProviderName: r.ProviderName, ModelName: r.ModelName}
 }
 
-// prune 丢掉超过保留期的小时桶；日桶永久保留。
+// prune 丢掉超过保留期的分钟/小时桶；日桶永久保留。
 func (s *Store) prune(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -150,10 +158,15 @@ func (s *Store) prune(now time.Time) {
 }
 
 func (s *Store) pruneLocked(now time.Time) {
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	cutoff := dayStart.AddDate(0, 0, -(retentionDays - 1)).Format(hourLayout)
+	minuteCutoff := now.Add(-minuteRetention).Format(minuteLayout)
+	for k := range s.minutes {
+		if k.Period < minuteCutoff {
+			delete(s.minutes, k)
+		}
+	}
+	hourCutoff := now.Add(-hourRetention).Format(hourLayout)
 	for k := range s.hours {
-		if k.Period < cutoff {
+		if k.Period < hourCutoff {
 			delete(s.hours, k)
 		}
 	}

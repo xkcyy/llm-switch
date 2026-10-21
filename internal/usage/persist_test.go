@@ -14,7 +14,8 @@ func TestStorePersistsAcrossReopen(t *testing.T) {
 	}
 	now := time.Now()
 	s.Add(Entry{Time: now, ProviderID: "p", ProviderName: "P", ModelID: "m", ModelName: "M", Caller: "Codex",
-		OK: true, HasUsage: true, Input: 10, Output: 5, Total: 15, Cached: 2})
+		OK: true, Outcome: OutcomeSuccess, HasUsage: true, Input: 10, Output: 5, Total: 15, Cached: 2,
+		HasTiming: true, TTFTMS: 120, DecodeMS: 500})
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -29,9 +30,16 @@ func TestStorePersistsAcrossReopen(t *testing.T) {
 	if tot.Requests != 1 || tot.OK != 1 || tot.Input != 10 || tot.Output != 5 || tot.Total != 15 || tot.Cached != 2 {
 		t.Fatalf("重启后用量丢失：%+v", tot)
 	}
+	if tot.TTFTSamples != 1 || tot.SpeedSamples != 1 || tot.DecodeMS != 500 {
+		t.Fatalf("重启后时序指标丢失：%+v", tot)
+	}
 	res := reopened.Query(Query{From: now.Add(-time.Hour), To: now.Add(time.Hour), Granularity: GranDay, Group: GroupModel})
 	if len(res.Groups) != 1 || res.Groups[0].ModelName != "M" || res.Groups[0].ProviderName != "P" {
 		t.Fatalf("名称快照未持久化：%+v", res.Groups)
+	}
+	minuteRes := reopened.Query(Query{From: now, To: now, Granularity: GranMinute, Group: GroupProvider})
+	if len(minuteRes.Groups) != 1 || minuteRes.Totals.SpeedSamples != 1 {
+		t.Fatalf("分钟桶未持久化：%+v", minuteRes)
 	}
 }
 
