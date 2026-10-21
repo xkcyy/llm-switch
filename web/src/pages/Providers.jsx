@@ -666,7 +666,7 @@ export default function Providers({ navigate }) {
         okText={`添加选中的 ${importState?.keys.length || 0} 个模型`}
         cancelText="稍后再说"
         confirmLoading={importing}
-        width={820}
+        width={1080}
         styles={{ body: { maxHeight: '58vh', overflowY: 'auto' } }}
       >
         {importState && (
