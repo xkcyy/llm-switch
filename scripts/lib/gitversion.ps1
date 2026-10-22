@@ -139,7 +139,8 @@ function Get-ReleaseNotes {
     if ($start -lt 0) { return '' }
     $body = @()
     for ($i = $start + 1; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^##\s') { break }
+        # 版本标题都是 ###，日期标题是 ##；遇到任一标题即结束，避免把下一版本写进本次说明。
+        if ($lines[$i] -match '^##{2,3}\s') { break }
         $body += $lines[$i]
     }
     return (($body -join "`n").Trim())
