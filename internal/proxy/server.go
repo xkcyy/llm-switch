@@ -423,8 +423,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, entry proto
 		return
 	}
 	if !bytes.Equal(extReq.Body, upstreamBody) {
-		req.Body = io.NopCloser(bytes.NewReader(extReq.Body))
-		req.ContentLength = int64(len(extReq.Body))
+		patched := append([]byte(nil), extReq.Body...)
+		req.Body = io.NopCloser(bytes.NewReader(patched))
+		req.ContentLength = int64(len(patched))
+		// GetBody 也必须指向改写后的正文；重定向或连接重试会用它重放请求，
+		// 否则兼容扩展补的 reasoning_content 等字段会静默丢失。
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(patched)), nil
+		}
 	}
 
 	resp, err := s.client.Do(req)

@@ -866,3 +866,39 @@ func TestProxyEchoesClientReasoning(t *testing.T) {
 		t.Fatalf("有真实内容时不应使用占位文本: %s", lastBody)
 	}
 }
+
+// 兼容扩展改写请求体后，重定向/连接重试必须复用改写后的 GetBody。
+// 否则 Go 会用原始请求体重放，导致 reasoning_content 静默消失。
+func TestProxyCompatBodySurvivesRedirect(t *testing.T) {
+	var finalBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/chat/completions" {
+			http.Redirect(w, r, "/redirect-target", http.StatusTemporaryRedirect)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		finalBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	ts := newTestProxyWith(t, upstream.URL, func(c *config.Config) {
+		c.Providers[0].Preset = "deepseek"
+	})
+	body := `{"model":"deepseek/deepseek-chat","stream":false,"input":[
+		{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"call_redirect"},
+		{"type":"function_call_output","call_id":"call_redirect","output":"done"}
+	]}`
+	resp, err := http.Post(ts.URL+"/v1/responses", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if !strings.Contains(finalBody, `"reasoning_content":"(reasoning omitted)"`) {
+		t.Fatalf("重定向后兼容扩展补丁丢失: %s", finalBody)
+	}
+}
