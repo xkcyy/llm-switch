@@ -17,7 +17,7 @@ import {
   Tooltip,
   Typography
 } from 'antd'
-import { CopyOutlined, ReloadOutlined, RightOutlined } from '@ant-design/icons'
+import { CopyOutlined, DownloadOutlined, ExportOutlined, ReloadOutlined, RightOutlined } from '@ant-design/icons'
 import { Api } from '../api'
 import PageHeader from '../components/PageHeader'
 import Panel from '../components/Panel'
@@ -51,6 +51,7 @@ const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('zh-CN', { hour12: 
 const RAW_ROW_HEIGHT = 20
 const RAW_OVERSCAN = 8
 const RAW_MAX_LINE_CHARS = 200
+const RAW_NATIVE_VIEW_BYTES = 512 * 1024
 
 // splitRawText 把超长文本切成固定长度的显示行，供虚拟列表计算高度。
 // 只用于渲染；复制始终使用原始文本。
@@ -121,8 +122,9 @@ function VirtualText({ text }) {
   )
 }
 
-// RawBody 提供独立滚动的报文视口与全文复制，不把长文本撑进模态窗口。
-function RawBody({ title, body, bytes, emptyText, loading, error }) {
+// RawBody 对小报文使用 React 虚拟列表；大报文交给浏览器原生文本视图，
+// 避免把几十 MB 内容读成 JavaScript 字符串后再切行。
+function RawBody({ title, body, url, bytes, emptyText, loading, error, downloadName }) {
   const { message } = App.useApp()
   const [copying, setCopying] = useState(false)
 
@@ -157,21 +159,52 @@ function RawBody({ title, body, bytes, emptyText, loading, error }) {
           <Text type="secondary" className="text-xs">
             {fmtBytes(bytes || body?.length || 0)}
           </Text>
+          {url && (
+            <Text type="secondary" className="text-xs">
+              浏览器原生视图，复制请按 Ctrl+A / Ctrl+C
+            </Text>
+          )}
         </Space>
-        <Button
-          size="small"
-          icon={<CopyOutlined />}
-          loading={copying}
-          disabled={!body}
-          onClick={copy}
-        >
-          复制全部
-        </Button>
+        <Space size={6}>
+          {url && (
+            <>
+              <Button
+                size="small"
+                icon={<ExportOutlined />}
+                onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}
+              >
+                新窗口打开
+              </Button>
+              <Button size="small" icon={<DownloadOutlined />} href={url} download={downloadName}>
+                下载
+              </Button>
+            </>
+          )}
+          {!url && (
+            <Button
+              size="small"
+              icon={<CopyOutlined />}
+              loading={copying}
+              disabled={!body}
+              onClick={copy}
+            >
+              复制全部
+            </Button>
+          )}
+        </Space>
       </div>
       {loading ? (
         <div className="trace-raw-loading">
           <Spin size="small" />
         </div>
+      ) : url ? (
+        <iframe
+          className="trace-text-native"
+          src={url}
+          title={`${title}（浏览器原生视图）`}
+          sandbox=""
+          referrerPolicy="no-referrer"
+        />
       ) : body ? (
         <VirtualText text={body} />
       ) : (
@@ -320,7 +353,15 @@ export default function Trajectory() {
   const [rawTab, setRawTab] = useState('request')
   const [rawData, setRawData] = useState(null)
   const [rawBodies, setRawBodies] = useState({})
+  const rawBodyURLsRef = useRef({})
   const loadingRef = useRef(false)
+
+  const revokeRawBodyURLs = useCallback(() => {
+    for (const url of Object.values(rawBodyURLsRef.current)) URL.revokeObjectURL(url)
+    rawBodyURLsRef.current = {}
+  }, [])
+
+  useEffect(() => () => revokeRawBodyURLs(), [revokeRawBodyURLs])
 
   const load = useCallback(async (silent = false) => {
     if (loadingRef.current) return
@@ -367,21 +408,37 @@ export default function Trajectory() {
       .finally(() => setDetailLoading(false))
   }
 
-  const loadRawBody = useCallback(async (id, part) => {
+  const loadRawBody = useCallback(async (id, part, bytes) => {
+    const nativeView = bytes >= RAW_NATIVE_VIEW_BYTES
     setRawBodies((prev) => ({
       ...prev,
-      [part]: { body: '', loading: true, error: '', loaded: false }
+      [part]: { body: '', url: '', loading: true, error: '', loaded: false }
     }))
     try {
-      const body = await Api.trajectory.body(id, part)
-      setRawBodies((prev) => ({
-        ...prev,
-        [part]: { body, loading: false, error: '', loaded: true }
-      }))
+      if (nativeView) {
+        const blob = await Api.trajectory.bodyBlob(id, part)
+        const url = URL.createObjectURL(blob)
+        const previous = rawBodyURLsRef.current[part]
+        rawBodyURLsRef.current[part] = url
+        if (previous) URL.revokeObjectURL(previous)
+        setRawBodies((prev) => ({
+          ...prev,
+          [part]: { body: '', url, size: blob.size, loading: false, error: '', loaded: true }
+        }))
+      } else {
+        const body = await Api.trajectory.body(id, part)
+        const previous = rawBodyURLsRef.current[part]
+        delete rawBodyURLsRef.current[part]
+        if (previous) URL.revokeObjectURL(previous)
+        setRawBodies((prev) => ({
+          ...prev,
+          [part]: { body, url: '', size: body.length, loading: false, error: '', loaded: true }
+        }))
+      }
     } catch (e) {
       setRawBodies((prev) => ({
         ...prev,
-        [part]: { body: '', loading: false, error: e.message, loaded: true }
+        [part]: { body: '', url: '', loading: false, error: e.message, loaded: true }
       }))
     }
   }, [])
@@ -392,6 +449,7 @@ export default function Trajectory() {
     setRawTab(tab)
     setRawData(null)
     setRawBodies({})
+    revokeRawBodyURLs()
     setRawOpen(true)
     try {
       const res = await Api.trajectory.raw(id)
@@ -400,7 +458,11 @@ export default function Trajectory() {
         headers: res.headers || [],
         response: res.response || null
       })
-      if (tab === 'request' || res.response) loadRawBody(id, tab)
+      if (tab === 'request') {
+        loadRawBody(id, 'request', res.entry?.bytes ?? selected.bytes ?? 0)
+      } else if (res.response) {
+        loadRawBody(id, 'response', res.response.bytes ?? 0)
+      }
     } catch (e) {
       setRawOpen(false)
       message.error(e.message)
@@ -411,7 +473,15 @@ export default function Trajectory() {
     setRawTab(tab)
     if (!selected || rawBodies[tab]?.loaded || rawBodies[tab]?.loading) return
     if (tab === 'response' && rawData && !rawData.response) return
-    loadRawBody(selected.id, tab)
+    const bytes =
+      tab === 'request' ? rawData?.entry?.bytes ?? selected.bytes ?? 0 : rawData?.response?.bytes ?? 0
+    loadRawBody(selected.id, tab, bytes)
+  }
+
+  const closeRaw = () => {
+    setRawOpen(false)
+    setRawBodies({})
+    revokeRawBodyURLs()
   }
 
   const rows = doc?.rows || []
@@ -658,7 +728,7 @@ export default function Trajectory() {
       <Modal
         className="trace-raw-modal"
         open={rawOpen}
-        onCancel={() => setRawOpen(false)}
+        onCancel={closeRaw}
         footer={null}
         width={960}
         title={selected ? `#${selected.id} 原始报文` : '原始报文'}
@@ -702,10 +772,12 @@ export default function Trajectory() {
                   <RawBody
                     title="请求体"
                     body={rawBodies.request?.body}
+                    url={rawBodies.request?.url}
                     bytes={rawData?.entry?.bytes}
                     emptyText="没有记录到请求体"
                     loading={!rawData || rawBodies.request?.loading}
                     error={rawBodies.request?.error}
+                    downloadName={`trajectory-${selected?.id}-request.txt`}
                   />
                 </div>
               )
@@ -752,10 +824,12 @@ export default function Trajectory() {
                   <RawBody
                     title="响应体"
                     body={rawBodies.response?.body}
+                    url={rawBodies.response?.url}
                     bytes={rawData.response.bytes}
                     emptyText="没有记录到响应体"
                     loading={rawBodies.response?.loading}
                     error={rawBodies.response?.error}
+                    downloadName={`trajectory-${selected?.id}-response.txt`}
                   />
                 </div>
               ) : (

@@ -64,6 +64,34 @@ func decodeInto[T any](t *testing.T, body []byte) T {
 	return v
 }
 
+func TestProviderPresetsUseShortDefaultIDs(t *testing.T) {
+	mux, _ := newTestServer(t)
+	code, body := do(t, mux, http.MethodGet, "/api/providers/presets", "")
+	if code != 200 {
+		t.Fatalf("读取预设失败: %d %s", code, body)
+	}
+	presets := decodeInto[[]struct {
+		Preset     string `json:"preset"`
+		ProviderID string `json:"provider_id"`
+	}](t, body)
+	want := map[string]string{
+		"km-aimodelhub": "km",
+		"opencode-go":   "oc",
+		"deepseek":      "ds",
+		"openai":        "oa",
+		"anthropic":     "an",
+		"custom":        "",
+	}
+	if len(presets) != len(want) {
+		t.Fatalf("预设数量应为 %d，实际 %d", len(want), len(presets))
+	}
+	for _, p := range presets {
+		if got, ok := want[p.Preset]; !ok || got != p.ProviderID {
+			t.Fatalf("预设 %q 的默认供应商 ID 应为 %q，实际 %q", p.Preset, got, p.ProviderID)
+		}
+	}
+}
+
 func apiError(t *testing.T, body []byte) string {
 	t.Helper()
 	var e map[string]string

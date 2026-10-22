@@ -66,6 +66,27 @@ async function requestText(path) {
   return res.text()
 }
 
+async function requestBlob(path) {
+  const res = await fetch(path, { headers: { 'X-Admin-Token': readToken() } })
+  if (!res.ok) {
+    const text = await res.text()
+    let msg = `请求失败（HTTP ${res.status}）`
+    try {
+      msg = JSON.parse(text)?.error || msg
+    } catch {
+      if (text) msg = text
+    }
+    if (res.status === 401 && !sessionStorage.getItem('llm-switch-token-retry')) {
+      sessionStorage.setItem('llm-switch-token-retry', '1')
+      window.location.reload()
+      throw new Error(msg || '管理令牌已更新，页面正在重新加载')
+    }
+    throw new Error(msg)
+  }
+  sessionStorage.removeItem('llm-switch-token-retry')
+  return res.blob()
+}
+
 export const Api = {
   overview: () => request('/api/overview'),
   usage: {
@@ -80,7 +101,8 @@ export const Api = {
     list: () => request('/api/trajectory'),
     detail: (id) => request(`/api/trajectory/${id}`),
     raw: (id) => request(`/api/trajectory/${id}/raw?body=0`),
-    body: (id, part) => requestText(`/api/trajectory/${id}/body/${part}`)
+    body: (id, part) => requestText(`/api/trajectory/${id}/body/${part}`),
+    bodyBlob: (id, part) => requestBlob(`/api/trajectory/${id}/body/${part}`)
   },
 
   providers: {

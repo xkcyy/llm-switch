@@ -149,22 +149,23 @@ export default function Providers({ navigate }) {
 
   const openAdd = () => {
     const fallback = presets.find((p) => p.key === 'deepseek') || presets[0]
+    const id = fallback.defaultId ?? deriveId(fallback.label)
     setAddDefaults({
       preset: fallback.key,
       name: fallback.label,
-      id: deriveId(fallback.label),
+      id,
       baseUrl: fallback.baseUrl,
       protocols: fallback.protocols || [fallback.protocol],
       apiKey: ''
     })
-    autoIdRef.current = deriveId(fallback.label)
+    autoIdRef.current = id
     setAddOpen(true)
   }
 
   const onPresetChange = (key) => {
     const preset = presets.find((p) => p.key === key)
     const name = preset.label === '自定义' ? '' : preset.label
-    const id = deriveId(name)
+    const id = preset.defaultId ?? deriveId(name)
     form.setFieldsValue({ name, baseUrl: preset.baseUrl, protocols: preset.protocols || [preset.protocol], id })
     autoIdRef.current = id
   }
@@ -625,7 +626,7 @@ export default function Providers({ navigate }) {
             ]}
             extra="请求名前缀：供应商 ID/模型 ID，建议使用英文小写，创建后可修改"
           >
-            <Input className="mono" placeholder="例如 deepseek" onChange={(e) => form.setFieldValue('id', e.target.value)} />
+            <Input className="mono" placeholder="例如 ds" onChange={(e) => form.setFieldValue('id', e.target.value)} />
           </Form.Item>
           <Form.Item
             name="apiKey"

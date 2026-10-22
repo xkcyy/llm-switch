@@ -6,12 +6,12 @@ const Ctx = createContext(null)
 export const useApp = () => useContext(Ctx)
 
 export const PRESETS = [
-  { key: 'km-aimodelhub', label: 'KmAiModelHub', protocol: 'responses', protocols: ['responses', 'chat'], baseUrl: 'https://aimodelhub.ai.kmsoft.com.cn/v1', hint: '企业模型网关 · 同时提供 Responses / Chat' },
-  { key: 'opencode-go', label: 'OpenCode Go', protocol: 'chat', protocols: ['chat'], baseUrl: 'https://opencode.ai/zen/go/v1', hint: '多端点网关 · 模型级可固定协议' },
-  { key: 'deepseek', label: 'DeepSeek', protocol: 'chat', protocols: ['chat'], baseUrl: 'https://api.deepseek.com', hint: 'OpenAI 兼容 · 无需 /v1' },
-  { key: 'openai', label: 'OpenAI', protocol: 'responses', protocols: ['responses', 'chat'], baseUrl: 'https://api.openai.com/v1', hint: 'Responses 优先，兼容 Chat' },
-  { key: 'anthropic', label: 'Anthropic', protocol: 'messages', protocols: ['messages'], baseUrl: 'https://api.anthropic.com/v1', hint: 'Messages API' },
-  { key: 'custom', label: '自定义', protocol: 'chat', protocols: ['chat'], baseUrl: '', hint: '手动填写地址' }
+  { key: 'km-aimodelhub', defaultId: 'km', label: 'KmAiModelHub', protocol: 'responses', protocols: ['responses', 'chat'], baseUrl: 'https://aimodelhub.ai.kmsoft.com.cn/v1', hint: '企业模型网关 · 同时提供 Responses / Chat' },
+  { key: 'opencode-go', defaultId: 'oc', label: 'OpenCode Go', protocol: 'chat', protocols: ['chat'], baseUrl: 'https://opencode.ai/zen/go/v1', hint: '多端点网关 · 模型级可固定协议' },
+  { key: 'deepseek', defaultId: 'ds', label: 'DeepSeek', protocol: 'chat', protocols: ['chat'], baseUrl: 'https://api.deepseek.com', hint: 'OpenAI 兼容 · 无需 /v1' },
+  { key: 'openai', defaultId: 'oa', label: 'OpenAI', protocol: 'responses', protocols: ['responses', 'chat'], baseUrl: 'https://api.openai.com/v1', hint: 'Responses 优先，兼容 Chat' },
+  { key: 'anthropic', defaultId: 'an', label: 'Anthropic', protocol: 'messages', protocols: ['messages'], baseUrl: 'https://api.anthropic.com/v1', hint: 'Messages API' },
+  { key: 'custom', defaultId: '', label: '自定义', protocol: 'chat', protocols: ['chat'], baseUrl: '', hint: '手动填写地址' }
 ]
 
 const mapProvider = (p) => ({
@@ -333,6 +333,7 @@ export function AppStoreProvider({ children }) {
           setPresets(
             list.map((p) => ({
               key: p.preset,
+              defaultId: p.provider_id || '',
               label: p.name,
               protocol: p.protocol,
               protocols: p.protocols?.length ? p.protocols : p.protocol ? [p.protocol] : ['chat'],

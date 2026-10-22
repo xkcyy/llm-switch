@@ -357,6 +357,8 @@ func (s *Server) handleTrajectoryBody(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
@@ -719,12 +721,12 @@ func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePresets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, []map[string]any{
-		{"preset": "km-aimodelhub", "name": "KmAiModelHub", "protocol": "responses", "protocols": []string{"responses", "chat"}, "base_url": "https://aimodelhub.ai.kmsoft.com.cn/v1", "hint": "企业模型网关 · 同时提供 Responses / Chat"},
-		{"preset": "opencode-go", "name": "OpenCode Go", "protocol": "chat", "protocols": []string{"chat"}, "base_url": "https://opencode.ai/zen/go/v1", "hint": "多端点网关 · 模型级可固定协议"},
-		{"preset": "deepseek", "name": "DeepSeek", "protocol": "chat", "protocols": []string{"chat"}, "base_url": "https://api.deepseek.com", "hint": "OpenAI 兼容 · 无需 /v1"},
-		{"preset": "openai", "name": "OpenAI", "protocol": "responses", "protocols": []string{"responses", "chat"}, "base_url": "https://api.openai.com/v1", "hint": "Responses 优先，兼容 Chat"},
-		{"preset": "anthropic", "name": "Anthropic", "protocol": "messages", "protocols": []string{"messages"}, "base_url": "https://api.anthropic.com/v1", "hint": "Messages API"},
-		{"preset": "custom", "name": "自定义", "protocol": "chat", "protocols": []string{"chat"}, "base_url": "", "hint": "手动填写地址"},
+		{"preset": "km-aimodelhub", "provider_id": "km", "name": "KmAiModelHub", "protocol": "responses", "protocols": []string{"responses", "chat"}, "base_url": "https://aimodelhub.ai.kmsoft.com.cn/v1", "hint": "企业模型网关 · 同时提供 Responses / Chat"},
+		{"preset": "opencode-go", "provider_id": "oc", "name": "OpenCode Go", "protocol": "chat", "protocols": []string{"chat"}, "base_url": "https://opencode.ai/zen/go/v1", "hint": "多端点网关 · 模型级可固定协议"},
+		{"preset": "deepseek", "provider_id": "ds", "name": "DeepSeek", "protocol": "chat", "protocols": []string{"chat"}, "base_url": "https://api.deepseek.com", "hint": "OpenAI 兼容 · 无需 /v1"},
+		{"preset": "openai", "provider_id": "oa", "name": "OpenAI", "protocol": "responses", "protocols": []string{"responses", "chat"}, "base_url": "https://api.openai.com/v1", "hint": "Responses 优先，兼容 Chat"},
+		{"preset": "anthropic", "provider_id": "an", "name": "Anthropic", "protocol": "messages", "protocols": []string{"messages"}, "base_url": "https://api.anthropic.com/v1", "hint": "Messages API"},
+		{"preset": "custom", "provider_id": "", "name": "自定义", "protocol": "chat", "protocols": []string{"chat"}, "base_url": "", "hint": "手动填写地址"},
 	})
 }
 
