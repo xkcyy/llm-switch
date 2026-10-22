@@ -165,6 +165,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/trajectory", s.handleTrajectoryList)
 	mux.HandleFunc("GET /api/trajectory/{id}", s.handleTrajectoryDetail)
 	mux.HandleFunc("GET /api/trajectory/{id}/raw", s.handleTrajectoryRaw)
+	mux.HandleFunc("GET /api/trajectory/{id}/body/{part}", s.handleTrajectoryBody)
 
 	mux.HandleFunc("GET /api/providers", s.handleProviderList)
 	mux.HandleFunc("POST /api/providers", s.handleProviderCreate)
@@ -291,11 +292,11 @@ func (s *Server) handleTrajectoryDetail(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	resp["document"] = doc
+	resp["document"] = previewTraceDocument(doc)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleTrajectoryRaw 返回单条请求的原始入站请求体与上游响应体。
+// handleTrajectoryRaw 返回原始报文的元数据；body=0 时不返回正文。
 func (s *Server) handleTrajectoryRaw(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {
@@ -307,21 +308,57 @@ func (s *Server) handleTrajectoryRaw(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "轨迹记录不存在或已被覆盖"})
 		return
 	}
-	resp := map[string]any{
-		"entry": entry, "headers": entry.Headers, "body": string(entry.Body),
-		"response": nil,
+	includeBody := r.URL.Query().Get("body") != "0"
+	resp := map[string]any{"entry": entry, "headers": entry.Headers, "response": nil}
+	if includeBody {
+		resp["body"] = string(entry.Body)
 	}
 	if entry.Response != nil {
-		resp["response"] = map[string]any{
+		rawResp := map[string]any{
 			"status":    entry.Response.Status,
 			"proto":     entry.Response.Proto,
 			"bytes":     entry.Response.Bytes,
 			"truncated": entry.Response.Truncated,
 			"headers":   entry.Response.Headers,
-			"body":      string(entry.Response.Body),
 		}
+		if includeBody {
+			rawResp["body"] = string(entry.Response.Body)
+		}
+		resp["response"] = rawResp
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTrajectoryBody 以纯文本返回单个报文正文，避免大字符串进入 JSON 编解码。
+func (s *Server) handleTrajectoryBody(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求 ID 无效"})
+		return
+	}
+	entry, ok := s.proxy.Traces().Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "轨迹记录不存在或已被覆盖"})
+		return
+	}
+	var body []byte
+	switch r.PathValue("part") {
+	case "request":
+		body = entry.Body
+	case "response":
+		if entry.Response == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "请求未到达上游或响应尚未记录"})
+			return
+		}
+		body = entry.Response.Body
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "报文类型无效"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // handleUsage 返回累计与今日的用量合计。时间粒度与分组查询在后续迭代补齐。

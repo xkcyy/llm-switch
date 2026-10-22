@@ -121,6 +121,29 @@ func TestTrajectoryListDetailRaw(t *testing.T) {
 		t.Fatalf("原始响应缺少响应头: %+v", rawResp.Response.Headers)
 	}
 
+	code, raw = do(t, mux, http.MethodGet, "/api/trajectory/1/raw?body=0", "")
+	if code != 200 {
+		t.Fatalf("原始报文元数据失败: %d %s", code, raw)
+	}
+	meta := decodeInto[struct {
+		Body     *string `json:"body"`
+		Response *struct {
+			Body *string `json:"body"`
+		} `json:"response"`
+	}](t, raw)
+	if meta.Body != nil || meta.Response == nil || meta.Response.Body != nil {
+		t.Fatalf("body=0 不应返回正文: %s", raw)
+	}
+
+	code, raw = do(t, mux, http.MethodGet, "/api/trajectory/1/body/request", "")
+	if code != 200 || string(raw) != string(body) {
+		t.Fatalf("请求正文接口不一致: %d %q", code, raw)
+	}
+	code, raw = do(t, mux, http.MethodGet, "/api/trajectory/1/body/response", "")
+	if code != 200 || string(raw) != `{"ok":1}` {
+		t.Fatalf("响应正文接口不一致: %d %q", code, raw)
+	}
+
 	if code, _ := do(t, mux, http.MethodGet, "/api/trajectory/999", ""); code != http.StatusNotFound {
 		t.Fatalf("不存在的记录应返回 404，实际 %d", code)
 	}

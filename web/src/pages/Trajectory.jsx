@@ -9,6 +9,7 @@ import {
   Input,
   Modal,
   Space,
+  Spin,
   Switch,
   Table,
   Tabs,
@@ -16,7 +17,7 @@ import {
   Tooltip,
   Typography
 } from 'antd'
-import { ReloadOutlined, RightOutlined } from '@ant-design/icons'
+import { CopyOutlined, ReloadOutlined, RightOutlined } from '@ant-design/icons'
 import { Api } from '../api'
 import PageHeader from '../components/PageHeader'
 import Panel from '../components/Panel'
@@ -46,6 +47,139 @@ const fmtBytes = (n) => {
 }
 
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('zh-CN', { hour12: false }) : '—')
+
+const RAW_ROW_HEIGHT = 20
+const RAW_OVERSCAN = 8
+const RAW_MAX_LINE_CHARS = 200
+
+// splitRawText 把超长文本切成固定长度的显示行，供虚拟列表计算高度。
+// 只用于渲染；复制始终使用原始文本。
+function splitRawText(text) {
+  const lines = []
+  let lineStart = 0
+  while (lineStart < text.length) {
+    let lineEnd = text.indexOf('\n', lineStart)
+    if (lineEnd === -1) lineEnd = text.length
+    let cursor = lineStart
+    while (lineEnd - cursor > RAW_MAX_LINE_CHARS) {
+      const chunk = text.slice(cursor, cursor + RAW_MAX_LINE_CHARS)
+      lines.push(chunk.endsWith('\r') ? chunk.slice(0, -1) : chunk)
+      cursor += RAW_MAX_LINE_CHARS
+    }
+    const tail = text.slice(cursor, lineEnd)
+    lines.push(tail.endsWith('\r') ? tail.slice(0, -1) : tail)
+    lineStart = lineEnd + 1
+  }
+  return lines
+}
+
+// VirtualText 只渲染视口附近的行，避免几十 MB 文本一次性进入 DOM。
+function VirtualText({ text }) {
+  const viewportRef = useRef(null)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(0)
+  const lines = useMemo(() => splitRawText(text), [text])
+
+  useEffect(() => {
+    const el = viewportRef.current
+    if (!el) return undefined
+    const update = () => setViewportHeight(el.clientHeight)
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (viewportRef.current) viewportRef.current.scrollTop = 0
+    setScrollTop(0)
+  }, [text])
+
+  const start = Math.max(0, Math.floor(scrollTop / RAW_ROW_HEIGHT) - RAW_OVERSCAN)
+  const visibleCount = Math.max(1, Math.ceil((viewportHeight || 400) / RAW_ROW_HEIGHT)) + RAW_OVERSCAN * 2
+  const end = Math.min(lines.length, start + visibleCount)
+  const visible = lines.slice(start, end)
+
+  return (
+    <div
+      ref={viewportRef}
+      className="trace-text-viewport"
+      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+    >
+      <div className="trace-text-canvas" style={{ height: lines.length * RAW_ROW_HEIGHT }}>
+        {visible.map((line, i) => (
+          <div
+            key={start + i}
+            className="trace-text-row"
+            style={{ top: (start + i) * RAW_ROW_HEIGHT }}
+          >
+            {line || ' '}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// RawBody 提供独立滚动的报文视口与全文复制，不把长文本撑进模态窗口。
+function RawBody({ title, body, bytes, emptyText, loading, error }) {
+  const { message } = App.useApp()
+  const [copying, setCopying] = useState(false)
+
+  const copy = async () => {
+    if (!body) return
+    setCopying(true)
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+      await navigator.clipboard.writeText(body)
+      message.success(`${title}已复制`)
+    } catch {
+      const area = document.createElement('textarea')
+      area.value = body
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      const ok = document.execCommand('copy')
+      area.remove()
+      if (ok) message.success(`${title}已复制`)
+      else message.error('复制失败')
+    } finally {
+      setCopying(false)
+    }
+  }
+
+  return (
+    <section className="trace-raw-body">
+      <div className="trace-raw-body-head">
+        <Space size={8}>
+          <Text strong>{title}</Text>
+          <Text type="secondary" className="text-xs">
+            {fmtBytes(bytes || body?.length || 0)}
+          </Text>
+        </Space>
+        <Button
+          size="small"
+          icon={<CopyOutlined />}
+          loading={copying}
+          disabled={!body}
+          onClick={copy}
+        >
+          复制全部
+        </Button>
+      </div>
+      {loading ? (
+        <div className="trace-raw-loading">
+          <Spin size="small" />
+        </div>
+      ) : body ? (
+        <VirtualText text={body} />
+      ) : (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={error || emptyText} />
+      )}
+    </section>
+  )
+}
 
 // prettyJSON 尝试把工具参数格式化成缩进 JSON，失败则原样返回。
 const prettyJSON = (v) => {
@@ -112,6 +246,11 @@ function RowDetail({ row }) {
           role: {row.role}
         </Text>
       )}
+      {row.truncated && (
+        <Text type="warning" className="text-xs">
+          内容过大，轨迹页仅展示截断版本；完整内容请查看原始请求。
+        </Text>
+      )}
       {row.text && <Pre text={row.text} max={0} />}
       {row.arguments && (
         <div className="trace-sub">
@@ -152,6 +291,11 @@ function ToolItem({ tool }) {
       </div>
       {open && (
         <div className="trace-tool-body">
+          {tool.truncated && (
+            <Text type="warning" className="text-xs">
+              工具定义过大，已截断展示。
+            </Text>
+          )}
           {tool.description && <Pre text={tool.description} max={0} />}
           {tool.parameters && <Pre text={prettyJSON(tool.parameters)} max={0} />}
         </div>
@@ -175,6 +319,7 @@ export default function Trajectory() {
   const [rawOpen, setRawOpen] = useState(false)
   const [rawTab, setRawTab] = useState('request')
   const [rawData, setRawData] = useState(null)
+  const [rawBodies, setRawBodies] = useState({})
   const loadingRef = useRef(false)
 
   const load = useCallback(async (silent = false) => {
@@ -222,20 +367,51 @@ export default function Trajectory() {
       .finally(() => setDetailLoading(false))
   }
 
-  const openRaw = async (tab = 'request') => {
+  const loadRawBody = useCallback(async (id, part) => {
+    setRawBodies((prev) => ({
+      ...prev,
+      [part]: { body: '', loading: true, error: '', loaded: false }
+    }))
     try {
-      const res = await Api.trajectory.raw(selected.id)
+      const body = await Api.trajectory.body(id, part)
+      setRawBodies((prev) => ({
+        ...prev,
+        [part]: { body, loading: false, error: '', loaded: true }
+      }))
+    } catch (e) {
+      setRawBodies((prev) => ({
+        ...prev,
+        [part]: { body: '', loading: false, error: e.message, loaded: true }
+      }))
+    }
+  }, [])
+
+  const openRaw = async (tab = 'request') => {
+    if (!selected) return
+    const id = selected.id
+    setRawTab(tab)
+    setRawData(null)
+    setRawBodies({})
+    setRawOpen(true)
+    try {
+      const res = await Api.trajectory.raw(id)
       setRawData({
         entry: res.entry || selected,
         headers: res.headers || [],
-        body: res.body || '',
         response: res.response || null
       })
-      setRawTab(tab)
-      setRawOpen(true)
+      if (tab === 'request' || res.response) loadRawBody(id, tab)
     } catch (e) {
+      setRawOpen(false)
       message.error(e.message)
     }
+  }
+
+  const switchRawTab = (tab) => {
+    setRawTab(tab)
+    if (!selected || rawBodies[tab]?.loaded || rawBodies[tab]?.loading) return
+    if (tab === 'response' && rawData && !rawData.response) return
+    loadRawBody(selected.id, tab)
   }
 
   const rows = doc?.rows || []
@@ -254,13 +430,19 @@ export default function Trajectory() {
   const columns = [
     { title: '#', dataIndex: 'id', width: 60, render: (v) => <Text type="secondary">#{v}</Text> },
     { title: '时间', dataIndex: 'time', width: 170, render: (v) => <Text type="secondary">{fmtTime(v)}</Text> },
-    { title: '来源', dataIndex: 'source', width: 90, render: (v) => v || '未知' },
-    { title: '入口', dataIndex: 'protocol', width: 110, render: (v) => <Tag bordered={false}>{v}</Tag> },
-    { title: '请求模型', dataIndex: 'request_model', render: (v) => <Text className="mono">{v}</Text> },
+    { title: '来源', dataIndex: 'source', width: 104, ellipsis: true, render: (v) => v || '未知' },
+    { title: '入口', dataIndex: 'protocol', width: 100, render: (v) => <Tag bordered={false}>{v}</Tag> },
+    {
+      title: '请求模型',
+      dataIndex: 'request_model',
+      width: 180,
+      ellipsis: true,
+      render: (v) => <Text className="mono">{v}</Text>
+    },
     {
       title: '会话',
       dataIndex: 'session',
-      width: 160,
+      width: 264,
       ellipsis: true,
       render: (v) =>
         v ? (
@@ -276,7 +458,8 @@ export default function Trajectory() {
     {
       title: '结果',
       dataIndex: 'status',
-      width: 80,
+      width: 76,
+      align: 'center',
       render: (v) =>
         v >= 200 && v < 300 ? (
           <Tag color="success" bordered={false}>
@@ -288,8 +471,14 @@ export default function Trajectory() {
           </Tag>
         )
     },
-    { title: '耗时', dataIndex: 'duration_ms', width: 90, render: (v) => (v ? `${(v / 1000).toFixed(1)}s` : '—') },
-    { title: '大小', dataIndex: 'bytes', width: 90, render: fmtBytes }
+    {
+      title: '耗时',
+      dataIndex: 'duration_ms',
+      width: 84,
+      align: 'right',
+      render: (v) => (v ? `${(v / 1000).toFixed(1)}s` : '—')
+    },
+    { title: '大小', dataIndex: 'bytes', width: 84, align: 'right', render: fmtBytes }
   ]
 
   const detailTabs = [
@@ -396,12 +585,14 @@ export default function Trajectory() {
         bodyClassName="flush"
       >
         <Table
+          className="trajectory-table"
           size="small"
+          tableLayout="fixed"
           rowKey="id"
           loading={loading}
           pagination={{ pageSize: 20, size: 'small' }}
           dataSource={list}
-          scroll={{ x: 900 }}
+          scroll={{ x: 1122 }}
           onRow={(record) => ({ onClick: () => open(record), style: { cursor: 'pointer' } })}
           locale={{
             emptyText: (
@@ -456,10 +647,16 @@ export default function Trajectory() {
             <Text type="danger">解析失败：{detailError}（原始 JSON 仍可查看）</Text>
           </Card>
         )}
+        {doc?.truncated && (
+          <Card className="soft-card" variant="borderless" size="small" style={{ marginBottom: 12 }}>
+            <Text type="warning">轨迹内容过大，已截断展示；完整内容请查看原始请求。</Text>
+          </Card>
+        )}
         <Tabs items={detailTabs} destroyInactiveTabPane />
       </Drawer>
 
       <Modal
+        className="trace-raw-modal"
         open={rawOpen}
         onCancel={() => setRawOpen(false)}
         footer={null}
@@ -467,8 +664,9 @@ export default function Trajectory() {
         title={selected ? `#${selected.id} 原始报文` : '原始报文'}
       >
         <Tabs
+          destroyInactiveTabPane
           activeKey={rawTab}
-          onChange={setRawTab}
+          onChange={switchRawTab}
           items={[
             {
               key: 'request',
@@ -501,7 +699,14 @@ export default function Trajectory() {
                       </div>
                     </>
                   )}
-                  <pre className="trace-pre">{rawData?.body}</pre>
+                  <RawBody
+                    title="请求体"
+                    body={rawBodies.request?.body}
+                    bytes={rawData?.entry?.bytes}
+                    emptyText="没有记录到请求体"
+                    loading={!rawData || rawBodies.request?.loading}
+                    error={rawBodies.request?.error}
+                  />
                 </div>
               )
             },
@@ -544,7 +749,14 @@ export default function Trajectory() {
                       </Text>
                     )}
                   </div>
-                  <pre className="trace-pre">{rawData.response.body}</pre>
+                  <RawBody
+                    title="响应体"
+                    body={rawBodies.response?.body}
+                    bytes={rawData.response.bytes}
+                    emptyText="没有记录到响应体"
+                    loading={rawBodies.response?.loading}
+                    error={rawBodies.response?.error}
+                  />
                 </div>
               ) : (
                 <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请求未到达上游或响应尚未记录" />

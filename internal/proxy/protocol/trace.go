@@ -9,9 +9,10 @@ import (
 // TraceDocument 是一条入站请求解析出的轨迹：合并后的系统提示词、工具目录与历史行。
 // 只服务管理界面的「轨迹」视图，与协议转换无关；直通路径同样可解析。
 type TraceDocument struct {
-	System string      `json:"system"`
-	Tools  []TraceTool `json:"tools"`
-	Rows   []TraceRow  `json:"rows"`
+	System    string      `json:"system"`
+	Tools     []TraceTool `json:"tools"`
+	Rows      []TraceRow  `json:"rows"`
+	Truncated bool        `json:"truncated,omitempty"`
 }
 
 // TraceTool 是请求声明的工具目录项。
@@ -19,6 +20,7 @@ type TraceTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Truncated   bool            `json:"truncated,omitempty"`
 }
 
 // 轨迹行类型。system 包含 instructions 与 developer/system 消息；reasoning 是思考内容。
@@ -44,6 +46,7 @@ type TraceRow struct {
 	Arguments string `json:"arguments,omitempty"` // 工具调用参数
 	Output    string `json:"output,omitempty"`    // 工具结果
 	Images    int    `json:"images,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // TraceRequest 解析一条入站请求体，产出轨迹文档。三种入口协议都支持。
